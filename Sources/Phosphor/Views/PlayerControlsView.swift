@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+enum ControlPresentation {
+    static let fullScreenActionLabel = "Toggle Full Screen"
+}
+
 struct ControlPreferences: Equatable {
     var isBypassed: Bool
     var savedIntensity: Double
@@ -61,15 +65,18 @@ struct PlayerControlsView: View {
                 store.togglePlayback()
             } label: {
                 Image(systemName: store.transport == .playing ? "pause.fill" : "play.fill")
-                    .frame(width: 16)
             }
+            .frame(width: 20)
             .accessibilityLabel(store.transport == .playing ? "Pause" : "Play")
             .help(store.transport == .playing ? "Pause" : "Play")
 
             Text(timeLabel)
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
-                .fixedSize()
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .truncationMode(.middle)
+                .frame(width: 92, alignment: .leading)
                 .accessibilityLabel("Playback time \(timeLabel)")
 
             Slider(
@@ -77,13 +84,14 @@ struct PlayerControlsView: View {
                 in: 0 ... max(store.duration, 1),
                 onEditingChanged: updateScrubbing
             )
-            .frame(minWidth: 140)
+            .frame(width: 140)
             .disabled(store.duration <= 0)
             .accessibilityLabel("Playback position")
             .accessibilityValue(TimeFormatting.playerTime(seekBinding.wrappedValue))
 
             Image(systemName: volumeSymbol)
                 .foregroundStyle(.secondary)
+                .frame(width: 16)
                 .accessibilityHidden(true)
 
             Slider(value: volumeBinding, in: 0 ... 1)
@@ -92,18 +100,20 @@ struct PlayerControlsView: View {
                 .accessibilityValue("\(Int(store.volume * 100)) percent")
 
             Divider()
-                .frame(height: 18)
+                .frame(width: 1, height: 18)
 
             Toggle(isOn: $preferences.isBypassed) {
                 Image(systemName: "rectangle.on.rectangle.slash")
             }
             .toggleStyle(.button)
             .labelStyle(.iconOnly)
+            .frame(width: 24)
             .accessibilityLabel("Bypass CRT Effect")
             .help("Bypass CRT Effect")
 
             Image(systemName: "sparkles")
                 .foregroundStyle(preferences.isBypassed ? .secondary : Color.phosphorGreen)
+                .frame(width: 16)
                 .accessibilityHidden(true)
 
             Slider(value: $preferences.savedIntensity, in: 0 ... 1)
@@ -117,6 +127,7 @@ struct PlayerControlsView: View {
             } label: {
                 Image(systemName: "slider.horizontal.3")
             }
+            .frame(width: 20)
             .accessibilityLabel("Advanced CRT Settings")
             .help("Advanced CRT Settings")
             .popover(isPresented: $isInspectorPresented, arrowEdge: .top) {
@@ -128,8 +139,9 @@ struct PlayerControlsView: View {
             } label: {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
             }
-            .accessibilityLabel("Enter Full Screen")
-            .help("Enter Full Screen")
+            .frame(width: 20)
+            .accessibilityLabel(ControlPresentation.fullScreenActionLabel)
+            .help(ControlPresentation.fullScreenActionLabel)
         }
         .buttonStyle(.borderless)
         .controlSize(.small)

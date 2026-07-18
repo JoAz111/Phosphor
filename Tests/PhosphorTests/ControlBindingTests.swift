@@ -2,6 +2,13 @@ import XCTest
 @testable import Phosphor
 
 final class ControlBindingTests: XCTestCase {
+    func testFullScreenPresentationUsesTruthfulToggleLabel() {
+        XCTAssertEqual(
+            ControlPresentation.fullScreenActionLabel,
+            "Toggle Full Screen"
+        )
+    }
+
     func testPreferencesConstructClampedShaderSettings() {
         let preferences = ControlPreferences(
             savedIntensity: -1,
