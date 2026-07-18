@@ -31,6 +31,24 @@ final class ShaderSettingsTests: XCTestCase {
         XCTAssertEqual(settings.vignette, 1)
     }
 
+    func testInitializerSanitizesNonfiniteValues() {
+        let settings = ShaderSettings(
+            intensity: .nan,
+            curvature: .infinity,
+            scanlines: -.infinity,
+            mask: .nan,
+            glow: .infinity,
+            vignette: -.infinity
+        )
+
+        XCTAssertEqual(settings.intensity, 0.88)
+        XCTAssertEqual(settings.curvature, 0.25)
+        XCTAssertEqual(settings.scanlines, 0)
+        XCTAssertEqual(settings.mask, 0.42)
+        XCTAssertEqual(settings.glow, 1)
+        XCTAssertEqual(settings.vignette, 0)
+    }
+
     func testZeroIntensityBypassesShader() {
         let settings = ShaderSettings(intensity: 0)
 

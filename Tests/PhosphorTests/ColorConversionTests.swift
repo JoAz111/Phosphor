@@ -38,4 +38,13 @@ final class ColorConversionTests: XCTestCase {
             bt709.convert(y: sample.y, u: sample.u, v: sample.v).x
         )
     }
+
+    func testVideoRangeChromaIsScaledForEncodedRed() {
+        let conversion = YUVConversion.make(matrix: .bt601, range: .video)
+        let rgb = conversion.convert(y: 81 / 255, u: 90 / 255, v: 240 / 255)
+
+        XCTAssertEqual(rgb.x, 1, accuracy: 0.01)
+        XCTAssertEqual(rgb.y, 0, accuracy: 0.01)
+        XCTAssertEqual(rgb.z, 0, accuracy: 0.01)
+    }
 }

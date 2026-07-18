@@ -2,7 +2,7 @@ import Foundation
 
 enum TimeFormatting {
     static func playerTime(_ seconds: TimeInterval) -> String {
-        guard seconds.isFinite, seconds >= 0, seconds <= TimeInterval(Int.max) else {
+        guard seconds.isFinite, seconds >= 0, seconds < TimeInterval(Int.max) else {
             return "0:00"
         }
 

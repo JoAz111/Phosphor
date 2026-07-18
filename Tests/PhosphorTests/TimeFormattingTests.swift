@@ -16,4 +16,11 @@ final class TimeFormattingTests: XCTestCase {
         XCTAssertEqual(TimeFormatting.playerTime(.infinity), "0:00")
         XCTAssertEqual(TimeFormatting.playerTime(.nan), "0:00")
     }
+
+    func testIntegerBoundaryUsesZero() {
+        let boundary = TimeInterval(Int.max)
+
+        XCTAssertEqual(TimeFormatting.playerTime(boundary), "0:00")
+        XCTAssertEqual(TimeFormatting.playerTime(boundary.nextUp), "0:00")
+    }
 }

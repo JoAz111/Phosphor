@@ -27,12 +27,14 @@ struct YUVConversion: Sendable {
             return makeRows(
                 yScale: 1,
                 yOffset: 0,
+                chromaScale: 1,
                 coefficients: coefficients
             )
         case .video:
             return makeRows(
                 yScale: 255 / 219,
                 yOffset: -16 / 219,
+                chromaScale: 255 / 224,
                 coefficients: coefficients
             )
         }
@@ -50,17 +52,28 @@ struct YUVConversion: Sendable {
     private static func makeRows(
         yScale: Float,
         yOffset: Float,
+        chromaScale: Float,
         coefficients: (redV: Float, greenU: Float, greenV: Float, blueU: Float)
     ) -> YUVConversion {
         YUVConversion(
-            red: SIMD4(yScale, 0, coefficients.redV, yOffset - coefficients.redV * 0.5),
+            red: SIMD4(
+                yScale,
+                0,
+                coefficients.redV * chromaScale,
+                yOffset - coefficients.redV * chromaScale * 0.5
+            ),
             green: SIMD4(
                 yScale,
-                coefficients.greenU,
-                coefficients.greenV,
-                yOffset - (coefficients.greenU + coefficients.greenV) * 0.5
+                coefficients.greenU * chromaScale,
+                coefficients.greenV * chromaScale,
+                yOffset - (coefficients.greenU + coefficients.greenV) * chromaScale * 0.5
             ),
-            blue: SIMD4(yScale, coefficients.blueU, 0, yOffset - coefficients.blueU * 0.5)
+            blue: SIMD4(
+                yScale,
+                coefficients.blueU * chromaScale,
+                0,
+                yOffset - coefficients.blueU * chromaScale * 0.5
+            )
         )
     }
 }

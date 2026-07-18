@@ -20,17 +20,18 @@ struct ShaderSettings: Sendable, Equatable {
         glow: Float = 0.18,
         vignette: Float = 0.28
     ) {
-        self.intensity = intensity.clamped(to: 0 ... 1)
-        self.curvature = curvature.clamped(to: 0 ... 0.25)
-        self.scanlines = scanlines.clamped(to: 0 ... 1)
-        self.mask = mask.clamped(to: 0 ... 1)
-        self.glow = glow.clamped(to: 0 ... 1)
-        self.vignette = vignette.clamped(to: 0 ... 1)
+        self.intensity = intensity.sanitized(defaultValue: 0.88, to: 0 ... 1)
+        self.curvature = curvature.sanitized(defaultValue: 0.08, to: 0 ... 0.25)
+        self.scanlines = scanlines.sanitized(defaultValue: 0.72, to: 0 ... 1)
+        self.mask = mask.sanitized(defaultValue: 0.42, to: 0 ... 1)
+        self.glow = glow.sanitized(defaultValue: 0.18, to: 0 ... 1)
+        self.vignette = vignette.sanitized(defaultValue: 0.28, to: 0 ... 1)
     }
 }
 
-private extension Comparable {
-    func clamped(to range: ClosedRange<Self>) -> Self {
-        min(max(self, range.lowerBound), range.upperBound)
+private extension Float {
+    func sanitized(defaultValue: Float, to range: ClosedRange<Float>) -> Float {
+        guard !isNaN else { return defaultValue }
+        return min(max(self, range.lowerBound), range.upperBound)
     }
 }
