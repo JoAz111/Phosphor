@@ -105,6 +105,9 @@ final class MetalRenderer: NSObject {
     private var drawableSize = SIMD2<Float>.zero
     private var renderTargets: GuestRenderTargets?
     private var frameCount: UInt64 = 0
+    private var isPlaybackActive = false
+    private var needsRedraw = false
+    private var requestedPresentationTime: TimeInterval?
 
     init(layer: CAMetalLayer) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -241,13 +244,29 @@ final class MetalRenderer: NSObject {
             lastPixelBuffer = nil
             renderTargets = nil
             frameCount = 0
+            needsRedraw = output != nil
+        }
+        if self.settings != settings {
+            needsRedraw = output != nil
         }
         self.output = output
         self.settings = settings
+        updateDisplayLinkState()
     }
 
     func setActive(_ isActive: Bool) {
-        displayLink.isPaused = !isActive
+        isPlaybackActive = isActive
+        updateDisplayLinkState()
+    }
+
+    func requestPresentation(at time: TimeInterval) {
+        let sanitized = time.isFinite ? max(time, 0) : 0
+        guard requestedPresentationTime != sanitized else { return }
+        requestedPresentationTime = sanitized
+        if !isPlaybackActive, output != nil {
+            needsRedraw = true
+            updateDisplayLinkState()
+        }
     }
 
     func drawableSizeDidChange(_ size: CGSize) {
@@ -257,8 +276,25 @@ final class MetalRenderer: NSObject {
         )
         if updatedSize != drawableSize {
             renderTargets = nil
+            needsRedraw = output != nil
         }
         drawableSize = updatedSize
+        updateDisplayLinkState()
+    }
+
+    static func shouldRender(
+        hasNewPixelBuffer: Bool,
+        needsRedraw: Bool,
+        hasLastPixelBuffer: Bool
+    ) -> Bool {
+        hasLastPixelBuffer && (hasNewPixelBuffer || needsRedraw)
+    }
+
+    static func shouldAdvanceHistory(
+        hasNewPixelBuffer: Bool,
+        historyIsValid: Bool
+    ) -> Bool {
+        hasNewPixelBuffer || !historyIsValid
     }
 
     static func guestRasterSize(
@@ -311,6 +347,20 @@ final class MetalRenderer: NSObject {
     }
 
     private func render(_ update: CAMetalDisplayLink.Update) {
+        guard let frameUpdate = pixelBuffer(
+            forHostTime: update.targetPresentationTimestamp
+        ) else {
+            return
+        }
+        guard Self.shouldRender(
+            hasNewPixelBuffer: frameUpdate.isNew,
+            needsRedraw: needsRedraw,
+            hasLastPixelBuffer: true
+        ) else {
+            updateDisplayLinkState()
+            return
+        }
+
         guard inFlightSemaphore.wait(timeout: .now()) == .success else {
             return
         }
@@ -322,9 +372,7 @@ final class MetalRenderer: NSObject {
             }
         }
 
-        guard let pixelBuffer = pixelBuffer(
-            forHostTime: update.targetPresentationTimestamp
-        ), let frame = makeFrame(from: pixelBuffer) else {
+        guard let frame = makeFrame(from: frameUpdate.pixelBuffer) else {
             return
         }
 
@@ -383,6 +431,10 @@ final class MetalRenderer: NSObject {
             let historyRead = targets.history[targets.historyReadIndex]
             let historyWriteIndex = 1 - targets.historyReadIndex
             let historyWrite = targets.history[historyWriteIndex]
+            let advancesHistory = Self.shouldAdvanceHistory(
+                hasNewPixelBuffer: frameUpdate.isNew,
+                historyIsValid: targets.historyIsValid
+            )
 
             guard encodePass(
                 commandBuffer: commandBuffer,
@@ -391,18 +443,32 @@ final class MetalRenderer: NSObject {
                 textures: frame.textures,
                 uniforms: &uniforms,
                 label: "1 Decode and Linearize"
-            ), encodePass(
-                commandBuffer: commandBuffer,
-                pipeline: afterglowPipeline,
-                target: historyWrite,
-                textures: [targets.raw, historyRead],
-                uniforms: &uniforms,
-                label: "2 Afterglow Feedback"
-            ), encodePass(
+            ) else {
+                return
+            }
+
+            let filteredSource: any MTLTexture
+            if advancesHistory {
+                guard encodePass(
+                    commandBuffer: commandBuffer,
+                    pipeline: afterglowPipeline,
+                    target: historyWrite,
+                    textures: [targets.raw, historyRead],
+                    uniforms: &uniforms,
+                    label: "2 Afterglow Feedback"
+                ) else {
+                    return
+                }
+                filteredSource = historyWrite
+            } else {
+                filteredSource = historyRead
+            }
+
+            guard encodePass(
                 commandBuffer: commandBuffer,
                 pipeline: sharpenPipeline,
                 target: targets.sharpened,
-                textures: [historyWrite],
+                textures: [filteredSource],
                 uniforms: &uniforms,
                 label: "3 HD Horizontal Reconstruction"
             ), encodePass(
@@ -437,7 +503,7 @@ final class MetalRenderer: NSObject {
                 commandBuffer: commandBuffer,
                 pipeline: beamPipeline,
                 target: targets.beam,
-                textures: [targets.sharpened, targets.bloom, historyWrite],
+                textures: [targets.sharpened, targets.bloom, filteredSource],
                 uniforms: &uniforms,
                 label: "8 Luminance-dependent Beam Reconstruction"
             ), encodePass(
@@ -451,8 +517,10 @@ final class MetalRenderer: NSObject {
                 return
             }
 
-            targets.historyReadIndex = historyWriteIndex
-            targets.historyIsValid = true
+            if advancesHistory {
+                targets.historyReadIndex = historyWriteIndex
+                targets.historyIsValid = true
+            }
         }
 
         let semaphore = inFlightSemaphore
@@ -462,7 +530,11 @@ final class MetalRenderer: NSObject {
             semaphore.signal()
         }
         commandBuffer.present(drawable)
-        frameCount &+= 1
+        needsRedraw = false
+        if frameUpdate.isNew {
+            frameCount &+= 1
+        }
+        updateDisplayLinkState()
         mustSignalSemaphore = false
         commandBuffer.commit()
     }
@@ -519,9 +591,10 @@ final class MetalRenderer: NSObject {
         return renderTargets
     }
 
-    private func pixelBuffer(forHostTime hostTime: CFTimeInterval) -> CVPixelBuffer? {
+    private func pixelBuffer(forHostTime hostTime: CFTimeInterval) -> VideoFrameUpdate? {
         guard let output else {
-            return lastPixelBuffer
+            guard let lastPixelBuffer else { return nil }
+            return VideoFrameUpdate(pixelBuffer: lastPixelBuffer, isNew: false)
         }
 
         let itemTime = output.itemTime(forHostTime: hostTime)
@@ -531,8 +604,14 @@ final class MetalRenderer: NSObject {
                itemTimeForDisplay: nil
            ) {
             lastPixelBuffer = pixelBuffer
+            return VideoFrameUpdate(pixelBuffer: pixelBuffer, isNew: true)
         }
-        return lastPixelBuffer
+        guard let lastPixelBuffer else { return nil }
+        return VideoFrameUpdate(pixelBuffer: lastPixelBuffer, isNew: false)
+    }
+
+    private func updateDisplayLinkState() {
+        displayLink.isPaused = !(isPlaybackActive || needsRedraw)
     }
 
     private func makeFrame(from pixelBuffer: CVPixelBuffer) -> PreparedFrame? {
@@ -657,6 +736,11 @@ final class MetalRenderer: NSObject {
         }
         return .bt709
     }
+}
+
+private struct VideoFrameUpdate {
+    let pixelBuffer: CVPixelBuffer
+    let isNew: Bool
 }
 
 extension MetalRenderer: CAMetalDisplayLinkDelegate {

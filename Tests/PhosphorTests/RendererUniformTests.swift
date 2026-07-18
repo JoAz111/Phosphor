@@ -2,6 +2,44 @@ import XCTest
 @testable import Phosphor
 
 final class RendererUniformTests: XCTestCase {
+    func testRendererSkipsDuplicateFramesUnlessPresentationIsDirty() {
+        XCTAssertFalse(MetalRenderer.shouldRender(
+            hasNewPixelBuffer: false,
+            needsRedraw: false,
+            hasLastPixelBuffer: true
+        ))
+        XCTAssertTrue(MetalRenderer.shouldRender(
+            hasNewPixelBuffer: false,
+            needsRedraw: true,
+            hasLastPixelBuffer: true
+        ))
+        XCTAssertTrue(MetalRenderer.shouldRender(
+            hasNewPixelBuffer: true,
+            needsRedraw: false,
+            hasLastPixelBuffer: true
+        ))
+        XCTAssertFalse(MetalRenderer.shouldRender(
+            hasNewPixelBuffer: true,
+            needsRedraw: true,
+            hasLastPixelBuffer: false
+        ))
+    }
+
+    func testTemporalHistoryAdvancesOnlyForVideoFramesOrInitialization() {
+        XCTAssertTrue(MetalRenderer.shouldAdvanceHistory(
+            hasNewPixelBuffer: true,
+            historyIsValid: true
+        ))
+        XCTAssertTrue(MetalRenderer.shouldAdvanceHistory(
+            hasNewPixelBuffer: false,
+            historyIsValid: false
+        ))
+        XCTAssertFalse(MetalRenderer.shouldAdvanceHistory(
+            hasNewPixelBuffer: false,
+            historyIsValid: true
+        ))
+    }
+
     func testGuestRasterUsesNativeSDLinesButResamplesHDVideo() {
         XCTAssertEqual(
             MetalRenderer.guestRasterSize(

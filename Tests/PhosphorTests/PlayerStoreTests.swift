@@ -17,6 +17,7 @@ final class PlayerStoreTests: XCTestCase {
         XCTAssertNil(store.currentURL)
         XCTAssertNil(store.errorMessage)
         XCTAssertNil(store.noticeMessage)
+        XCTAssertFalse(store.isLoading)
         XCTAssertNil(store.player.currentItem)
     }
 
@@ -152,6 +153,39 @@ final class PlayerStoreTests: XCTestCase {
         )
     }
 
+    func testFFmpegPreparationNoticeIsPresentedWithHDRNotice() async {
+        let prepared = makePreparedPlayerAsset(
+            duration: 12,
+            metadata: VideoColorMetadata(mediaCharacteristics: [.containsHDRVideo]),
+            preparation: .ffmpegTranscode
+        )
+        let store = PlayerStore(assetLoader: { _ in prepared })
+
+        await store.load(url: Self.url("ffmpeg-notice")).value
+
+        XCTAssertEqual(
+            store.noticeMessage,
+            "\(VideoColorMetadata.hdrSDRPathNotice) Prepared a compatible playback copy with FFmpeg."
+        )
+        XCTAssertFalse(store.isLoading)
+    }
+
+    func testLoadingStateCoversAsynchronousPreparation() async {
+        let loader = ControlledPlayerAssetLoader()
+        let url = Self.url("loading-state")
+        let store = PlayerStore(assetLoader: { url in
+            try await loader.load(url: url)
+        })
+
+        let task = store.load(url: url)
+        await loader.waitUntilRequested(url)
+        XCTAssertTrue(store.isLoading)
+
+        loader.succeed(url, with: makePreparedPlayerAsset(duration: 1))
+        await task.value
+        XCTAssertFalse(store.isLoading)
+    }
+
     func testSeekClampsFiniteValuesToLoadedDuration() async {
         let prepared = makePreparedPlayerAsset(duration: 60)
         let store = PlayerStore(assetLoader: { _ in prepared })
@@ -230,7 +264,8 @@ private final class ControlledPlayerAssetLoader {
 @MainActor
 private func makePreparedPlayerAsset(
     duration: TimeInterval,
-    metadata: VideoColorMetadata = VideoColorMetadata(mediaCharacteristics: [])
+    metadata: VideoColorMetadata = VideoColorMetadata(mediaCharacteristics: []),
+    preparation: MediaPreparation = .native
 ) -> PreparedPlayerAsset {
     let item = AVPlayerItem(url: URL(fileURLWithPath: "/dev/null"))
     let output = AVURLAssetLoader.videoOutputConfiguration.makeVideoOutput()
@@ -239,7 +274,8 @@ private func makePreparedPlayerAsset(
         item: item,
         output: output,
         duration: duration,
-        colorMetadata: metadata
+        colorMetadata: metadata,
+        preparation: preparation
     )
 }
 

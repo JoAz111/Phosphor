@@ -41,9 +41,11 @@ final class MetalVideoView: NSView {
 
     func configure(
         output: AVPlayerItemVideoOutput?,
-        settings: ShaderSettings
+        settings: ShaderSettings,
+        presentationTime: TimeInterval
     ) {
         renderer?.configure(output: output, settings: settings)
+        renderer?.requestPresentation(at: presentationTime)
     }
 
     func setActive(_ isActive: Bool) {

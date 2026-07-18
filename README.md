@@ -42,6 +42,8 @@ CPU-side image conversion or upload for every frame.
 - Native SwiftUI/AppKit macOS interface
 - AVFoundation playback with a custom `CAMetalLayer` presentation path
 - Nine-pass Metal CRT renderer and one-pass true bypass
+- Native-first playback with FFmpeg remux/transcode fallback for Matroska, AVI,
+  and uncommon codecs
 - NV12 and BGRA video input with Rec. 601/709/2020 matrix handling
 - Play/pause, seeking, volume, drag and drop, and full screen
 - Live controls for effect strength, curvature, beam scanlines, phosphor mask,
@@ -54,6 +56,18 @@ CPU-side image conversion or upload for every frame.
 - Apple Silicon Mac
 - macOS 14 or later
 - Xcode command-line tools with Swift 6
+
+QuickTime-compatible video works with no extra dependency. For MKV, AVI, and
+formats whose container or codec AVFoundation cannot decode, install FFmpeg:
+
+```sh
+brew install ffmpeg
+```
+
+Phosphor first attempts a lossless, fast container remux. Only when the codec
+itself is incompatible does it create a high-quality H.264/AAC playback copy.
+It prefers Apple VideoToolbox, falls back to `libx264`, caches the result, and
+never changes the original file.
 
 ## Build and run
 
@@ -115,8 +129,8 @@ script/         Reproducible build, bundle, launch, and debug entry point
 
 - The published renderer is a reduced Guest Advanced adaptation, not yet the
   complete 12-pass upstream graph.
-- Playback currently depends on AVFoundation's native container and codec
-  support. FFmpeg-backed MKV/AVI and uncommon-codec fallback is in development.
+- Compatibility playback currently uses a locally installed FFmpeg. A future
+  signed release can bundle a redistributable FFmpeg build and its notices.
 - HDR input currently follows an SDR presentation path and is identified in the
   interface rather than silently advertised as HDR output.
 - Development bundles are not Developer ID signed or notarized.
@@ -132,3 +146,7 @@ copyright (C) 2018-2025 guest(r), with ideas and contributions from Dr. Venom
 and the Libretro shader community. Portions of the mask logic originate in
 Timothy Lottes' public-domain CRT shader. See the source headers for attribution
 and modification notices.
+
+Phosphor invokes FFmpeg as a separate executable when compatibility playback is
+needed. FFmpeg is an independent project; see [ffmpeg.org](https://ffmpeg.org/)
+for its source code and license information.

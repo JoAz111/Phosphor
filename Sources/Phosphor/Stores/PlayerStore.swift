@@ -19,12 +19,16 @@ final class PlayerStore {
     private(set) var currentURL: URL?
     private(set) var errorMessage: String?
     private(set) var noticeMessage: String?
+    private(set) var isLoading = false
 
     @ObservationIgnored
     private var timeObserver: PlayerTimeObserver?
 
     @ObservationIgnored
     private var loadGeneration = 0
+
+    @ObservationIgnored
+    private var currentLoadTask: Task<Void, Never>?
 
     @ObservationIgnored
     private let assetLoader: PlayerAssetLoading
@@ -35,7 +39,7 @@ final class PlayerStore {
 
     init(
         player: AVPlayer = AVPlayer(),
-        assetLoader: @escaping PlayerAssetLoading = AVURLAssetLoader.load(url:)
+        assetLoader: @escaping PlayerAssetLoading = AdaptivePlayerAssetLoader.load(url:)
     ) {
         self.player = player
         self.assetLoader = assetLoader
@@ -49,18 +53,24 @@ final class PlayerStore {
 
     @discardableResult
     func load(url: URL) -> Task<Void, Never> {
+        currentLoadTask?.cancel()
         loadGeneration += 1
         let generation = loadGeneration
         errorMessage = nil
+        isLoading = true
 
-        return Task { [weak self] in
-            await self?.load(url: url, generation: generation)
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.load(url: url, generation: generation)
         }
+        currentLoadTask = task
+        return task
     }
 
     func presentOpenPanel() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.movie, .audiovisualContent]
+        panel.allowsOtherFileTypes = true
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
@@ -107,12 +117,22 @@ final class PlayerStore {
             duration = Self.finiteNonnegative(prepared.duration)
             errorMessage = nil
             noticeMessage = prepared.colorMetadata.sdrPathNotice
+            if let preparationNotice = prepared.preparation.notice {
+                noticeMessage = [noticeMessage, preparationNotice]
+                    .compactMap { $0 }
+                    .joined(separator: " ")
+            }
             transport = .playing
+            isLoading = false
             player.play()
         } catch is CancellationError {
+            if generation == loadGeneration {
+                isLoading = false
+            }
             return
         } catch {
             guard generation == loadGeneration else { return }
+            isLoading = false
             errorMessage = Self.errorMessage(for: error)
         }
     }
@@ -148,6 +168,10 @@ final class PlayerStore {
             "This file cannot be played."
         case PlayerLoadError.noVideoTrack:
             "This file has no video track."
+        case PlayerLoadError.ffmpegUnavailable:
+            "FFmpeg is required for this format. Install it with: brew install ffmpeg"
+        case PlayerLoadError.ffmpegFailed:
+            "FFmpeg could not prepare this video for playback."
         default:
             "The video could not be opened."
         }

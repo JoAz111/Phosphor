@@ -30,7 +30,8 @@ struct ContentView: View {
             MetalVideoRepresentable(
                 output: store.videoOutput,
                 settings: controlPreferences.shaderSettings,
-                active: store.hasMedia
+                active: store.transport == .playing,
+                presentationTime: store.currentTime
             )
 
             if !store.hasMedia {
@@ -38,6 +39,10 @@ struct ContentView: View {
             }
 
             VStack(spacing: 8) {
+                if store.isLoading {
+                    InlineProgressView(message: "Opening video…")
+                }
+
                 if let errorMessage = store.errorMessage {
                     InlineMessageView(
                         message: errorMessage,
@@ -163,6 +168,25 @@ struct ContentView: View {
             }
         }
         activityToken &+= 1
+    }
+}
+
+private struct InlineProgressView: View {
+    let message: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text(message)
+        }
+        .font(.callout)
+        .foregroundStyle(.primary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: Capsule())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(message)
     }
 }
 

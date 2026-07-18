@@ -9,6 +9,34 @@ struct PreparedPlayerAsset: Sendable {
     let output: AVPlayerItemVideoOutput
     let duration: TimeInterval
     let colorMetadata: VideoColorMetadata
+    let preparation: MediaPreparation
+
+    func prepared(using preparation: MediaPreparation) -> PreparedPlayerAsset {
+        PreparedPlayerAsset(
+            item: item,
+            output: output,
+            duration: duration,
+            colorMetadata: colorMetadata,
+            preparation: preparation
+        )
+    }
+}
+
+enum MediaPreparation: Sendable, Equatable {
+    case native
+    case ffmpegRemux
+    case ffmpegTranscode
+
+    var notice: String? {
+        switch self {
+        case .native:
+            nil
+        case .ffmpegRemux:
+            "Opened through FFmpeg compatibility mode."
+        case .ffmpegTranscode:
+            "Prepared a compatible playback copy with FFmpeg."
+        }
+    }
 }
 
 struct VideoOutputConfiguration: Equatable, Sendable {
@@ -69,12 +97,59 @@ enum AVURLAssetLoader {
             duration: loadedDuration.seconds,
             colorMetadata: VideoColorMetadata(
                 mediaCharacteristics: characteristics
-            )
+            ),
+            preparation: .native
         )
+    }
+}
+
+enum AdaptivePlayerAssetLoader {
+    @MainActor
+    static func load(url: URL) async throws -> PreparedPlayerAsset {
+        do {
+            return try await AVURLAssetLoader.load(url: url)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return try await loadUsingFFmpeg(url: url)
+        }
+    }
+
+    @MainActor
+    private static func loadUsingFFmpeg(url: URL) async throws -> PreparedPlayerAsset {
+        guard let executableURL = FFmpegExecutableLocator.locate() else {
+            throw PlayerLoadError.ffmpegUnavailable
+        }
+
+        let preparer = FFmpegMediaPreparer(executableURL: executableURL)
+
+        do {
+            let remuxedURL = try await preparer.prepare(url, mode: .remux)
+            return try await AVURLAssetLoader.load(url: remuxedURL)
+                .prepared(using: .ffmpegRemux)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // Some Matroska and AVI files contain codecs that QuickTime cannot
+            // decode even after their container is replaced. Convert those to
+            // a predictable VideoToolbox H.264 and AAC compatibility copy.
+        }
+
+        do {
+            let transcodedURL = try await preparer.prepare(url, mode: .transcode)
+            return try await AVURLAssetLoader.load(url: transcodedURL)
+                .prepared(using: .ffmpegTranscode)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw PlayerLoadError.ffmpegFailed
+        }
     }
 }
 
 enum PlayerLoadError: Error {
     case notPlayable
     case noVideoTrack
+    case ffmpegUnavailable
+    case ffmpegFailed
 }

@@ -5,16 +5,25 @@ struct MetalVideoRepresentable: NSViewRepresentable {
     let output: AVPlayerItemVideoOutput?
     let settings: ShaderSettings
     let active: Bool
+    let presentationTime: TimeInterval
 
     func makeNSView(context: Context) -> MetalVideoView {
         let view = MetalVideoView(frame: .zero)
-        view.configure(output: output, settings: settings)
+        view.configure(
+            output: output,
+            settings: settings,
+            presentationTime: presentationTime
+        )
         view.setActive(active)
         return view
     }
 
     func updateNSView(_ nsView: MetalVideoView, context: Context) {
-        nsView.configure(output: output, settings: settings)
+        nsView.configure(
+            output: output,
+            settings: settings,
+            presentationTime: presentationTime
+        )
         nsView.setActive(active)
     }
 
