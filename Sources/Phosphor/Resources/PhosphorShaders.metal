@@ -73,6 +73,25 @@ float phosphorMaximum(float3 color) {
     return max(max(color.r, color.g), color.b);
 }
 
+// A CRT's visible bloom comes from high-energy phosphor excitation rather than
+// a uniform blur of the whole picture. Linear-light soft-knee extraction keeps
+// blacks black while allowing midtones to enter the halo gradually.
+float3 guestHighlightEnergy(float3 color) {
+    float peak = phosphorMaximum(max(color, 0.0));
+    float gate = smoothstep(0.10, 0.75, peak);
+    return max(color, 0.0) * gate;
+}
+
+// Reserve highlight headroom for the additive light passes, then roll it into
+// the SDR drawable without a hard white clip. Values below the knee are exact.
+float3 guestSoftClip(float3 color) {
+    constexpr float knee = 0.86;
+    float3 positive = max(color, 0.0);
+    float3 excess = max(positive - knee, 0.0);
+    return min(positive, knee)
+        + (1.0 - knee) * (1.0 - exp(-excess / (1.0 - knee)));
+}
+
 float3 guestPlant(float3 color, float level) {
     return color * level / (phosphorMaximum(color) + 0.00001);
 }
@@ -406,11 +425,12 @@ fragment float4 guestGlowHorizontalFragment(
     ) * uniforms.rasterSize.zw;
     float2 dx = float2(uniforms.rasterSize.z, 0.0);
     for (int offset = -6; offset <= 6; ++offset) {
-        float weight = guestGaussian(float(offset) + fraction, 1.20);
-        color += weight * source.sample(
+        float weight = guestGaussian(float(offset) + fraction, 2.00);
+        float3 pixel = guestHighlightEnergy(source.sample(
             phosphorLinearSampler,
             center + float(offset) * dx
-        ).rgb;
+        ).rgb);
+        color += weight * pixel;
         weightSum += weight;
     }
     return float4(color / weightSum, 1.0);
@@ -431,7 +451,7 @@ fragment float4 guestGlowVerticalFragment(
     );
     float2 dy = float2(0.0, uniforms.rasterSize.w);
     for (int offset = -6; offset <= 6; ++offset) {
-        float weight = guestGaussian(float(offset) + fraction, 1.20);
+        float weight = guestGaussian(float(offset) + fraction, 2.00);
         color += weight * source.sample(
             phosphorLinearSampler,
             center + float(offset) * dy
@@ -453,12 +473,13 @@ fragment float4 guestBloomHorizontalFragment(
         floor(uniforms.rasterSize.xy * input.uv) + 0.5
     ) * uniforms.rasterSize.zw;
     float2 dx = float2(uniforms.rasterSize.z, 0.0);
-    for (int offset = -3; offset <= 3; ++offset) {
-        float weight = guestGaussian(float(offset) + fraction, 0.75);
-        float3 pixel = source.sample(
+    for (int offset = -6; offset <= 6; ++offset) {
+        float weight = guestGaussian(float(offset) + fraction, 2.40);
+        float sampleOffset = float(offset) * 1.75;
+        float3 pixel = guestHighlightEnergy(source.sample(
             phosphorLinearSampler,
-            center + float(offset) * dx
-        ).rgb;
+            center + sampleOffset * dx
+        ).rgb);
         float peak = phosphorMaximum(pixel);
         color += weight * float4(pixel, peak * peak * peak);
         weightSum += weight;
@@ -481,11 +502,12 @@ fragment float4 guestBloomVerticalFragment(
             * uniforms.rasterSize.w
     );
     float2 dy = float2(0.0, uniforms.rasterSize.w);
-    for (int offset = -3; offset <= 3; ++offset) {
-        float weight = guestGaussian(float(offset) + fraction, 0.60);
+    for (int offset = -6; offset <= 6; ++offset) {
+        float weight = guestGaussian(float(offset) + fraction, 2.00);
+        float sampleOffset = float(offset) * 1.75;
         float4 pixel = source.sample(
             phosphorLinearSampler,
-            center + float(offset) * dy
+            center + sampleOffset * dy
         );
         pixel.a = pixel.a * pixel.a * pixel.a;
         color += weight * pixel;
@@ -719,16 +741,25 @@ fragment float4 guestPhosphorMaskFragment(
     color *= brightBoost * darkCompensation;
 
     float glowControl = saturate(uniforms.effect2.x);
-    float glowParameter = glowControl * (0.08 / 0.18);
-    glow = mix(glow, 0.25 * color, colorMaximum);
-    color += 0.5 * glow * glowParameter;
+    float lightResponse = pow(glowControl, 0.65);
+    float haloPlacement = mix(
+        1.0,
+        0.35,
+        smoothstep(0.35, 1.0, colorMaximum)
+    );
 
-    // Bloom and halation remain wired to Guest's defaults (zero). Keeping the
-    // textures in the graph preserves the complete light-transport path for
-    // presets without inventing light that the upstream default does not add.
-    color += bloom * uniforms.guestLight.x;
-    color += bloom * float3(0.55, 0.18, 0.06) * uniforms.guestLight.y;
-    color = min(color, 1.0);
+    // Medium-radius phosphor diffusion. Reduce its contribution at the bright
+    // core so the same energy reads as a surrounding halo instead of softness.
+    glow = mix(glow, 0.25 * color, colorMaximum);
+    color += glow * (0.18 * lightResponse * haloPlacement);
+
+    // Wider neutral phosphor bloom and the warmer scatter produced by light
+    // travelling through the CRT faceplate. Both remain fully disabled at the
+    // zero position of Tube Glow.
+    float3 wideLight = bloom * lightResponse * haloPlacement;
+    color += wideLight * uniforms.guestLight.x;
+    color += wideLight * float3(1.0, 0.32, 0.12) * uniforms.guestLight.y;
+    color = guestSoftClip(color);
     color = pow(
         max(color, 0.0),
         float3(1.0 / uniforms.guestColor.y)

@@ -171,6 +171,83 @@ final class MetalShaderTests: XCTestCase {
         XCTAssertGreaterThan(bluePhosphor.x, bluePhosphor.y + 20)
     }
 
+    func testTubeGlowAddsNeutralBloomAndWarmHalation() throws {
+        let size = 12
+        let beam = try makeSolidFloatTexture(
+            width: size,
+            height: size,
+            color: SIMD4<Float>(0, 0, 0, 0)
+        )
+        let black = try makeSolidFloatTexture(
+            width: size,
+            height: size,
+            color: SIMD4<Float>(0, 0, 0, 1)
+        )
+        let bloom = try makeSolidFloatTexture(
+            width: size,
+            height: size,
+            color: SIMD4<Float>(0.35, 0.35, 0.35, 1)
+        )
+
+        let glowOn = try render(
+            function: "guestPhosphorMaskFragment",
+            outputSize: SIMD2(size, size),
+            outputFormat: .bgra8Unorm_srgb,
+            textures: [beam, black, bloom, black, black, black],
+            settings: ShaderSettings(
+                intensity: 1,
+                curvature: 0,
+                scanlines: 1,
+                mask: 0,
+                glow: ShaderSettings.default.glow,
+                vignette: 0
+            )
+        )
+        let glowOff = try render(
+            function: "guestPhosphorMaskFragment",
+            outputSize: SIMD2(size, size),
+            outputFormat: .bgra8Unorm_srgb,
+            textures: [beam, black, bloom, black, black, black],
+            settings: ShaderSettings(
+                intensity: 1,
+                curvature: 0,
+                scanlines: 1,
+                mask: 0,
+                glow: 0,
+                vignette: 0
+            )
+        )
+
+        let lit = bgraPixel(glowOn, width: size, x: 6, y: 6)
+        let unlit = bgraPixel(glowOff, width: size, x: 6, y: 6)
+        XCTAssertGreaterThan(lit.z, unlit.z + 20)
+        XCTAssertGreaterThan(lit.y, unlit.y + 20)
+        XCTAssertGreaterThan(lit.x, unlit.x + 20)
+        XCTAssertGreaterThan(lit.z, lit.x)
+    }
+
+    func testBloomSoftKneeKeepsDarkInputBlack() throws {
+        let size = 12
+        let dark = try makeSolidFloatTexture(
+            width: size,
+            height: size,
+            color: SIMD4<Float>(0.05, 0.05, 0.05, 1)
+        )
+        let pixels = try render(
+            function: "guestBloomHorizontalFragment",
+            outputSize: SIMD2(size, size),
+            outputFormat: .rgba16Float,
+            textures: [dark],
+            settings: .default
+        )
+
+        XCTAssertEqual(
+            halfFloatRed(pixels, width: size, x: 6, y: 6),
+            0,
+            accuracy: 0.001
+        )
+    }
+
     private var expectedEntryPoints: [(name: String, pixelFormat: MTLPixelFormat)] {
         [
             ("phosphorBypassFragmentNV12", .bgra8Unorm_srgb),

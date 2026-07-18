@@ -50,9 +50,11 @@ struct ShaderUniforms {
             0.20
         )
 
-        // CRT-Guest-Advanced HD defaults for its beam and light response.
+        // CRT-Guest-Advanced HD beam defaults with a Phosphor product preset
+        // for visible neutral bloom and warm faceplate halation. The final
+        // shader scales both light terms perceptually with the Tube Glow control.
         guestBeam = SIMD4(6.0, 8.0, 1.20, 1.0)
-        guestLight = SIMD4(0.0, 0.0, 1.40, 1.10)
+        guestLight = SIMD4(0.34, 0.12, 1.40, 1.10)
         guestColor = SIMD4(1.80, 1.75, 0.20, 0.50)
         guestScan = SIMD4(0.60, 0.75, 1.0, 2.40)
         guestMask = SIMD4(6.0, 1.10, 2.40, 1.0)
