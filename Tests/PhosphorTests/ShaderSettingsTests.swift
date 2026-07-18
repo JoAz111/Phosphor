@@ -1,0 +1,43 @@
+import XCTest
+@testable import Phosphor
+
+final class ShaderSettingsTests: XCTestCase {
+    func testDefaultValues() {
+        let settings = ShaderSettings.default
+
+        XCTAssertEqual(settings.intensity, 0.88)
+        XCTAssertEqual(settings.curvature, 0.08)
+        XCTAssertEqual(settings.scanlines, 0.72)
+        XCTAssertEqual(settings.mask, 0.42)
+        XCTAssertEqual(settings.glow, 0.18)
+        XCTAssertEqual(settings.vignette, 0.28)
+    }
+
+    func testInitializerClampsAtBothBounds() {
+        let settings = ShaderSettings(
+            intensity: -1,
+            curvature: 1,
+            scanlines: -1,
+            mask: 2,
+            glow: -1,
+            vignette: 2
+        )
+
+        XCTAssertEqual(settings.intensity, 0)
+        XCTAssertEqual(settings.curvature, 0.25)
+        XCTAssertEqual(settings.scanlines, 0)
+        XCTAssertEqual(settings.mask, 1)
+        XCTAssertEqual(settings.glow, 0)
+        XCTAssertEqual(settings.vignette, 1)
+    }
+
+    func testZeroIntensityBypassesShader() {
+        let settings = ShaderSettings(intensity: 0)
+
+        XCTAssertTrue(settings.isBypassed)
+    }
+
+    func testResetEqualsDefault() {
+        XCTAssertEqual(ShaderSettings(), .default)
+    }
+}
