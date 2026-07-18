@@ -1,0 +1,186 @@
+import SwiftUI
+
+struct ContentView: View {
+    let store: PlayerStore
+
+    @AppStorage("phosphor.shader.bypassed")
+    private var isBypassed = ControlPreferences.default.isBypassed
+    @AppStorage("phosphor.shader.intensity")
+    private var savedIntensity = ControlPreferences.default.savedIntensity
+    @AppStorage("phosphor.shader.curvature")
+    private var curvature = ControlPreferences.default.curvature
+    @AppStorage("phosphor.shader.scanlines")
+    private var scanlines = ControlPreferences.default.scanlines
+    @AppStorage("phosphor.shader.mask")
+    private var mask = ControlPreferences.default.mask
+    @AppStorage("phosphor.shader.glow")
+    private var glow = ControlPreferences.default.glow
+    @AppStorage("phosphor.shader.vignette")
+    private var vignette = ControlPreferences.default.vignette
+
+    @State private var controlsAreVisible = true
+    @State private var activityToken = 0
+    @State private var isScrubbing = false
+    @State private var isAdvancedInteractionActive = false
+
+    var body: some View {
+        ZStack {
+            Color.black
+
+            MetalVideoRepresentable(
+                output: store.videoOutput,
+                settings: controlPreferences.shaderSettings,
+                active: store.hasMedia
+            )
+
+            if !store.hasMedia {
+                emptyState
+            }
+
+            VStack(spacing: 8) {
+                if let errorMessage = store.errorMessage {
+                    InlineMessageView(
+                        message: errorMessage,
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                }
+
+                if let noticeMessage = store.noticeMessage {
+                    InlineMessageView(
+                        message: noticeMessage,
+                        systemImage: "info.circle.fill"
+                    )
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(16)
+
+            if store.hasMedia, controlsAreVisible {
+                VStack {
+                    Spacer()
+                    PlayerControlsView(
+                        store: store,
+                        preferences: controlPreferencesBinding,
+                        isScrubbing: $isScrubbing,
+                        isAdvancedInteractionActive: $isAdvancedInteractionActive
+                    )
+                    .padding(16)
+                }
+                .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
+        .onContinuousHover { phase in
+            guard case .active = phase else { return }
+            revealControls()
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let url = urls.first else { return false }
+            store.load(url: url)
+            revealControls()
+            return true
+        }
+        .onChange(of: store.transport) { _, _ in
+            revealControls()
+        }
+        .onChange(of: isScrubbing) { _, _ in
+            revealControls()
+        }
+        .onChange(of: isAdvancedInteractionActive) { _, _ in
+            revealControls()
+        }
+        .task(id: activityToken) {
+            guard shouldAutoHideControls else { return }
+
+            do {
+                try await Task.sleep(for: .seconds(2.5))
+            } catch {
+                return
+            }
+
+            guard shouldAutoHideControls else { return }
+            withAnimation(.easeOut(duration: 0.2)) {
+                controlsAreVisible = false
+            }
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 18) {
+            Text("PHOSPHOR")
+                .font(.system(size: 17, weight: .medium, design: .rounded))
+                .tracking(7)
+                .foregroundStyle(Color.phosphorGreen.opacity(0.72))
+
+            Button("Open Video…") {
+                store.presentOpenPanel()
+            }
+            .buttonStyle(.bordered)
+            .tint(Color.phosphorGreen.opacity(0.75))
+            .accessibilityLabel("Open Video")
+        }
+    }
+
+    private var shouldAutoHideControls: Bool {
+        store.transport == .playing
+            && !isScrubbing
+            && !isAdvancedInteractionActive
+    }
+
+    private var controlPreferences: ControlPreferences {
+        ControlPreferences(
+            isBypassed: isBypassed,
+            savedIntensity: savedIntensity,
+            curvature: curvature,
+            scanlines: scanlines,
+            mask: mask,
+            glow: glow,
+            vignette: vignette
+        )
+    }
+
+    private var controlPreferencesBinding: Binding<ControlPreferences> {
+        Binding(
+            get: { controlPreferences },
+            set: { preferences in
+                isBypassed = preferences.isBypassed
+                savedIntensity = preferences.savedIntensity
+                curvature = preferences.curvature
+                scanlines = preferences.scanlines
+                mask = preferences.mask
+                glow = preferences.glow
+                vignette = preferences.vignette
+            }
+        )
+    }
+
+    private func revealControls() {
+        if !controlsAreVisible {
+            withAnimation(.easeIn(duration: 0.12)) {
+                controlsAreVisible = true
+            }
+        }
+        activityToken &+= 1
+    }
+}
+
+private struct InlineMessageView: View {
+    let message: String
+    let systemImage: String
+
+    var body: some View {
+        Label(message, systemImage: systemImage)
+            .font(.callout)
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.regularMaterial, in: Capsule())
+            .accessibilityLabel(message)
+    }
+}
+
+extension Color {
+    static let phosphorGreen = Color(red: 0.46, green: 0.91, blue: 0.56)
+}
