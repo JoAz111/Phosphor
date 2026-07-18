@@ -1,78 +1,78 @@
-# Phosphor
+<p align="center">
+  <img src="assets/phosphor-icon.png" width="180" alt="Phosphor app icon">
+</p>
 
-**A native macOS video player that rebuilds every frame as light on a CRT.**
+<h1 align="center">Phosphor</h1>
 
-Phosphor plays local video through a real-time Metal rendering graph inspired by
-[CRT-Guest-Advanced HD](https://github.com/libretro/slang-shaders/tree/master/crt/shaders/guest/hd).
-Instead of placing a scanline texture over the picture, it reconstructs a virtual
-electron-beam raster, changes beam width with luminance, maps the result onto
-discrete RGB phosphors, and models the light that spreads through the phosphor
-layer and curved glass.
+<p align="center">
+  <strong>Your videos, rebuilt as light.</strong><br>
+  A native macOS video player with a real-time, Apple Silicon–optimized CRT renderer.
+</p>
 
-Phosphor is free software under **GPL-2.0-or-later**.
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS-14%2B-111111?logo=apple&logoColor=white" alt="macOS 14 or later">
+  <img src="https://img.shields.io/badge/Apple%20Silicon-native-111111" alt="Native Apple Silicon">
+  <img src="https://img.shields.io/badge/renderer-Metal-2f855a" alt="Metal renderer">
+  <img src="https://img.shields.io/badge/license-GPL--2.0--or--later-2f855a" alt="GPL-2.0-or-later">
+</p>
+
+<p align="center">
+  <a href="#build-from-source">Build from source</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#fidelity-and-roadmap">Fidelity</a>
+</p>
+
+---
+
+Phosphor is not a video player with a scanline texture on top. It reconstructs
+each frame as a virtual CRT would: a finite electron-beam raster, brightness-
+dependent beam shapes, discrete RGB phosphors, temporal persistence, diffuse
+light, and curved glass.
+
+It is native from end to end—SwiftUI and AppKit for the interface, AVFoundation
+for playback, and an eleven-stage Metal renderer for the tube.
 
 > [!IMPORTANT]
-> Phosphor is an early preview. The current renderer ports Guest Advanced HD's
-> default progressive signal path to native Metal, including its persistence,
-> color
-> prepass, 1.8-gamma linearization, reconstruction filters, beam response, light
-> spread, and physical-pixel mask. Optional upstream branches are listed under
-> Current limitations; exact RetroArch output parity is not claimed yet.
+> Phosphor is an early FOSS preview. The core progressive CRT path is working,
+> but exact pixel parity with the complete upstream Guest Advanced preset is not
+> claimed yet. See [Fidelity and roadmap](#fidelity-and-roadmap) for the honest
+> boundary.
 
-## What makes it a CRT renderer
+## A CRT, not a filter
 
-- **Virtual raster:** HD video is reconstructed as a finite set of CRT scanlines,
-  rather than darkened with a repeating overlay.
-- **Luminance-dependent beams:** dark details excite narrow beams; highlights
-  spread into wider, brighter beams.
-- **Physical-pixel phosphor mask:** the final Metal pass maps backing pixels into
-  repeating red, green, and blue aperture-grille emitters.
-- **Temporal phosphor response:** prior frames feed a persistence pass to model
-  phosphors decaying after the beam has moved on.
-- **Light transport:** separable glow and bloom passes approximate diffusion,
-  while red-biased halation simulates light scattering through the tube.
-- **Tube geometry:** curvature, rounded corners, overscan-safe aspect fitting,
-  and edge falloff shape the image as a piece of glass.
+- **Individual RGB phosphors.** The final pass addresses physical backing pixels
+  with CRT Guest Advanced's type 6 aperture-grille pattern. On Retina displays,
+  the mask scales in physical pixels—not SwiftUI points.
+- **Beams that react to the picture.** Dark detail produces narrow scanlines;
+  bright areas excite wider, softer beams instead of receiving identical black
+  stripes.
+- **Light with a memory.** Previous frames feed a phosphor-persistence pass while
+  separable glow and bloom stages model light spreading through the tube.
+- **Native performance.** Video frames enter Metal through `CVMetalTextureCache`
+  and stay in private `RGBA16Float` textures. The graph advances with source
+  frames, so 24/30 fps video does not run the full renderer at 60 fps or decay
+  persistence too quickly.
 
-All intermediate image processing uses private `RGBA16Float` Metal textures.
-AVFoundation video frames enter Metal through `CVMetalTextureCache`, avoiding a
-CPU-side image conversion or upload for every frame. The graph advances only
-when AVFoundation produces a new source frame, so 24/30 fps video does not run
-the complete shader chain 60 times per second or decay persistence too quickly.
+## Play almost anything
 
-## Features
+QuickTime-compatible media opens directly through AVFoundation. For Matroska,
+AVI, WebM, and uncommon codecs, Phosphor can fall back to FFmpeg:
 
-- Native SwiftUI/AppKit macOS interface
-- AVFoundation playback with a custom `CAMetalLayer` presentation path
-- Eleven-stage Metal CRT renderer and one-pass true bypass
-- Native-first playback with FFmpeg remux/transcode fallback for Matroska, AVI,
-  and uncommon codecs
-- NV12 and BGRA video input with Rec. 601/709/2020 matrix handling
-- Play/pause, seeking, volume, drag and drop, and full screen
-- Live controls for effect strength, curvature, beam scanlines, phosphor mask,
-  glow, and vignette
-- Retina-aware output and persistent preferences
-- Apple Silicon-first, with no web view or cross-platform UI runtime
+1. Try a fast, lossless container remux.
+2. If the codec is incompatible, create a high-quality H.264/AAC playback copy.
+3. Cache the prepared copy without modifying the original video.
 
-## Requirements
-
-- Apple Silicon Mac
-- macOS 14 or later
-- Xcode command-line tools with Swift 6
-
-QuickTime-compatible video works with no extra dependency. For MKV, AVI, and
-formats whose container or codec AVFoundation cannot decode, install FFmpeg:
+The compatibility path prefers Apple VideoToolbox, then falls back to `libx264`
+and a portable MPEG-4 encoder. Install FFmpeg with:
 
 ```sh
 brew install ffmpeg
 ```
 
-Phosphor first attempts a lossless, fast container remux. Only when the codec
-itself is incompatible does it create a high-quality H.264/AAC playback copy.
-It prefers Apple VideoToolbox, falls back to `libx264`, caches the result, and
-never changes the original file.
+## Build from source
 
-## Build and run
+You will need an Apple Silicon Mac, macOS 14 or later, and the Xcode command-line
+tools with Swift 6.
 
 ```sh
 git clone https://github.com/JoAz111/Phosphor.git
@@ -80,43 +80,86 @@ cd Phosphor
 ./script/build_and_run.sh
 ```
 
-The script builds the Swift package, stages a proper application bundle at
-`dist/Phosphor.app`, copies its Metal source, icon, and GPL notice into the
-bundle, then launches it. Normal runs package an optimized release executable;
-`--debug` builds the debuggable configuration. The script prefers Xcode Beta
-when present because the current SwiftPM resource layout is validated with that
-toolchain.
+The script creates an optimized, ad-hoc-signed app at `dist/Phosphor.app` and
+launches it. It also installs the app icon, Metal source, file-type declarations,
+and GPL notice into the bundle.
 
-Useful modes:
+Useful development modes:
 
 ```sh
 ./script/build_and_run.sh --verify    # launch and verify the process
-./script/build_and_run.sh --debug     # attach LLDB
+./script/build_and_run.sh --debug     # build debug and attach LLDB
 ./script/build_and_run.sh --logs      # stream app logs
 ./script/build_and_run.sh --telemetry # stream Phosphor subsystem logs
 ```
 
-Run the tests with:
+## Using Phosphor
+
+- Open a video with **Command-O**, drag and drop, **File → Open Video**, or
+  **Open With → Phosphor** in Finder.
+- Play or pause with **Space**.
+- Seek and change volume from the floating player controls.
+- Use **Bypass CRT Effect** for an immediate source comparison.
+- Tune curvature, beam scanlines, phosphor strength, tube glow, and vignette in
+  **Advanced CRT Settings**.
+- Enter full screen with the standard macOS window control.
+
+## How it works
+
+```text
+AVFoundation video
+  → zero-copy CVMetalTextureCache input
+  → encoded current/previous frame buffers
+  → phosphor persistence and color prepass
+  → Guest 1.8-gamma linearization
+  → horizontal reconstruction
+  → glow and bloom diffusion
+  → luminance-dependent beam reconstruction
+  → physical-pixel RGB aperture grille and glass
+  → CAMetalLayer
+```
+
+The Metal graph is based on
+[CRT-Guest-Advanced HD](https://github.com/libretro/slang-shaders/tree/master/crt/shaders/guest/hd)
+and adapted for progressive AVFoundation video, a variable window size, Retina
+backing pixels, and Apple Silicon GPUs. A true one-pass bypass remains separate
+from the CRT graph.
+
+## Fidelity and roadmap
+
+The current renderer ports Guest Advanced HD's default progressive signal path:
+persistence, color prepass, 1.8-gamma linearization, reconstruction filters,
+beam response, glow/bloom stages, brightness compensation, and the final mask.
+
+Phosphor intentionally selects Guest's type 6 RGB aperture grille instead of
+upstream's type 0 default so the individual emitters remain visible on modern
+Retina panels.
+
+Still to come:
+
+- Pixel-parity fixtures captured from a pinned RetroArch reference renderer
+- Optional color LUTs and the remaining Guest mask patterns
+- Interlacing and VGA-specific branches
+- Deconvergence and noise controls
+- A redistributable bundled FFmpeg build for signed releases
+- HDR-native output rather than the current clearly identified SDR path
+
+## Development
+
+Run the complete test suite with:
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
   swift test --scratch-path "${TMPDIR:-/tmp}/phosphor-swiftpm-tests"
 ```
 
-The GPU tests compile every shader entry point on a live Metal device and check
-Guest's input gamma, empty initial persistence, separated RGB phosphors,
-luminance-dependent raster lines, and an unmodified bypass image.
+The suite includes live-GPU checks for every Metal entry point, Guest's input
+gamma, initial persistence, luminance-dependent raster lines, discrete RGB
+phosphors, and true bypass. It also exercises a real FFmpeg-to-AVFoundation
+Matroska compatibility path.
 
-## Controls
-
-- Open video: **Command-O**, drag and drop, or **File > Open Video**
-- Play or pause: **Space**
-- Seek: timeline
-- Full screen: standard macOS full-screen control
-- Compare with the source: **Bypass CRT Effect**
-- Tune the tube: **Advanced CRT Settings**
-
-## Project structure
+<details>
+<summary>Project structure</summary>
 
 ```text
 Sources/Phosphor/
@@ -124,42 +167,26 @@ Sources/Phosphor/
   Models/       Rendering and playback value types
   Rendering/    CAMetalLayer integration, frame graph, and color conversion
   Resources/    Metal shaders and application icon
-  Stores/       AVFoundation playback state and media loading
+  Stores/       AVFoundation playback state and media preparation
   Views/        SwiftUI controls and AppKit/Metal bridge
 Tests/          CPU and live-GPU regression tests
-script/         Reproducible build, bundle, launch, and debug entry point
+script/         Build, bundle, launch, and debugging entry point
 ```
 
-## Current limitations
-
-- The renderer covers Guest Advanced HD's default progressive path, but not its
-  interlacing/VGA branches, optional color LUTs, noise/deconvergence controls,
-  or all 15 upstream mask patterns. Its two RetroArch stock-copy passes are
-  represented by Phosphor's decoded-current/retained-previous frame buffers
-  instead of issuing redundant full-frame GPU copies.
-- Phosphor deliberately selects Guest's type 6 RGB aperture-grille mask instead
-  of upstream's type 0 default so individual red, green, and blue emitters are
-  visible on modern Retina panels.
-- Pixel parity against a pinned RetroArch reference capture is still pending.
-- Compatibility playback currently uses a locally installed FFmpeg. A future
-  signed release can bundle a redistributable FFmpeg build and its notices.
-- HDR input currently follows an SDR presentation path and is identified in the
-  interface rather than silently advertised as HDR output.
-- Development bundles are not Developer ID signed or notarized.
+</details>
 
 ## License and credits
 
-Phosphor is licensed under the
+Phosphor is free software under the
 [GNU General Public License, version 2 or any later version](LICENSE).
 
-The renderer contains a modified Metal/macOS adaptation of
+The renderer is a modified Metal/macOS adaptation of
 [CRT-Guest-Advanced HD](https://github.com/libretro/slang-shaders/tree/master/crt/shaders/guest/hd),
-copyright (C) 2018-2025 guest(r), with ideas and contributions from Dr. Venom
-and the Libretro shader community. Portions of the mask logic originate in
-Timothy Lottes' public-domain CRT shader. See the source headers for attribution
-and modification notices. The current translation is based on upstream commit
-[`3b0d6aa`](https://github.com/libretro/slang-shaders/commit/3b0d6aa1d134a168478cd9c904a866d969f8882b).
+copyright © 2018–2025 guest(r), with ideas and contributions from Dr. Venom and
+the Libretro shader community. The current translation is based on upstream
+commit [`3b0d6aa`](https://github.com/libretro/slang-shaders/commit/3b0d6aa1d134a168478cd9c904a866d969f8882b).
+Portions of the mask logic originate in Timothy Lottes' public-domain CRT shader.
 
-Phosphor invokes FFmpeg as a separate executable when compatibility playback is
-needed. FFmpeg is an independent project; see [ffmpeg.org](https://ffmpeg.org/)
-for its source code and license information.
+Phosphor invokes FFmpeg as an independent executable when compatibility playback
+is needed. See [ffmpeg.org](https://ffmpeg.org/) for FFmpeg's source and license
+information.
