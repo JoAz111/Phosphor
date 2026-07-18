@@ -140,6 +140,7 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
+/usr/bin/xattr -cr "$APP_BUNDLE"
 /usr/bin/codesign --force --sign - "$APP_BINARY"
 /usr/bin/codesign --force --sign - "$APP_BUNDLE"
 /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
