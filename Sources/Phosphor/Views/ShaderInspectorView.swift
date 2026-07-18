@@ -24,17 +24,17 @@ struct ShaderInspectorView: View {
                 range: 0 ... 0.25
             )
             InspectorSlider(
-                title: "Scanlines",
+                title: "Beam Scanlines",
                 value: $preferences.scanlines,
                 range: 0 ... 1
             )
             InspectorSlider(
-                title: "Mask",
+                title: "Phosphor Mask",
                 value: $preferences.mask,
                 range: 0 ... 1
             )
             InspectorSlider(
-                title: "Glow",
+                title: "Tube Glow",
                 value: $preferences.glow,
                 range: 0 ... 1
             )

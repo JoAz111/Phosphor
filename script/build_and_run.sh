@@ -58,8 +58,9 @@ BUILD_BIN_DIR="$(swift build \
 BUILD_BINARY="$BUILD_BIN_DIR/$APP_NAME"
 BUILD_RESOURCE_BUNDLE="$BUILD_BIN_DIR/Phosphor_Phosphor.bundle"
 BUILD_ICON="$BUILD_RESOURCE_BUNDLE/Contents/Resources/Phosphor.icns"
+PROJECT_LICENSE="$ROOT_DIR/LICENSE"
 
-for required_path in "$BUILD_BINARY" "$BUILD_RESOURCE_BUNDLE" "$BUILD_ICON"; do
+for required_path in "$BUILD_BINARY" "$BUILD_RESOURCE_BUNDLE" "$BUILD_ICON" "$PROJECT_LICENSE"; do
   if [[ ! -e "$required_path" ]]; then
     echo "error: required build artifact is missing: $required_path" >&2
     exit 1
@@ -72,6 +73,7 @@ done
 /bin/chmod +x "$APP_BINARY"
 /bin/cp -R "$BUILD_RESOURCE_BUNDLE" "$APP_RESOURCES/"
 /bin/cp "$BUILD_ICON" "$APP_RESOURCES/Phosphor.icns"
+/bin/cp "$PROJECT_LICENSE" "$APP_RESOURCES/COPYING"
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

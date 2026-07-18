@@ -1,9 +1,10 @@
 # Phosphor
 
-Phosphor is a first-pass, open-source macOS video player for presenting local
-video through a real-time CRT simulation. It uses AVFoundation for playback and
-a native Metal renderer for aspect-fitted video, curvature, scanlines, an RGB
-mask, glow, and vignette.
+Phosphor is an open-source macOS video player that reconstructs local video as
+a simulated CRT raster. It uses AVFoundation for playback and a native,
+multi-pass Metal adaptation of CRT-Guest-Advanced HD for beam reconstruction,
+physical-pixel phosphors, bloom, halation, glow, persistence, curvature, and
+glass response.
 
 ## Requirements
 
@@ -33,14 +34,15 @@ DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
 
 The run script also supports `--verify`, `--debug`, `--logs`, and `--telemetry`.
 
-## First-pass scope and controls
+## Playback and controls
 
 - Open one local video with File > Open Video, Command-O, drag and drop, or the
   empty-state button.
 - Play or pause with the transport button or Space, seek with the timeline,
   adjust volume, and toggle full screen.
-- Bypass the CRT treatment, adjust its intensity, or tune curvature, scanlines,
-  mask, glow, and vignette in Advanced CRT Settings.
+- Bypass the CRT treatment, adjust its intensity, or tune curvature, beam
+  scanlines, the phosphor mask, tube glow, and vignette in Advanced CRT
+  Settings.
 - Settings persist locally between launches.
 
 ## Current limitations
@@ -56,6 +58,12 @@ The run script also supports `--verify`, `--debug`, `--logs`, and `--telemetry`.
 
 ## License and shader credit
 
-Phosphor is released under the [MIT License](LICENSE). Its CRT treatment is
-informed by Timothy Lottes' public-domain CRT shader; Phosphor's compact Metal
-implementation is maintained as native project code.
+Phosphor is released under the [GNU General Public License, version 2 or any
+later version](LICENSE).
+
+Its renderer is a modified Metal/macOS video adaptation of
+[CRT-Guest-Advanced HD](https://github.com/libretro/slang-shaders/tree/master/crt/shaders/guest/hd),
+copyright (C) 2018-2025 guest(r), with ideas contributed by Dr. Venom and the
+Libretro community. The upstream shader and Phosphor's translation are licensed
+under GPL-2.0-or-later. Portions of the upstream mask logic originated in
+Timothy Lottes' public-domain CRT shader.
