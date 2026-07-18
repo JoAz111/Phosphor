@@ -47,7 +47,7 @@ struct ShaderUniforms {
             settings.glow,
             settings.vignette,
             maskScale,
-            0.20
+            Float(settings.maskPattern.rawValue)
         )
 
         // CRT-Guest-Advanced HD beam defaults with a Phosphor product preset

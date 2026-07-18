@@ -9,6 +9,7 @@ final class ShaderSettingsTests: XCTestCase {
         XCTAssertEqual(settings.curvature, 0.08)
         XCTAssertEqual(settings.scanlines, 0.72)
         XCTAssertEqual(settings.mask, 0.42)
+        XCTAssertEqual(settings.maskPattern, .apertureGrille)
         XCTAssertEqual(settings.glow, 0.18)
         XCTAssertEqual(settings.vignette, 0.28)
     }

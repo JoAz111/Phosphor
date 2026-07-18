@@ -40,9 +40,9 @@ for playback, and an eleven-stage Metal renderer for the tube.
 
 ## A CRT, not a filter
 
-- **Individual RGB phosphors.** The final pass addresses physical backing pixels
-  with CRT Guest Advanced's type 6 aperture-grille pattern. On Retina displays,
-  the mask scales in physical pixels—not SwiftUI points.
+- **Individual RGB phosphors.** Choose CRT Guest Advanced's type 6 aperture
+  grille or its staggered slot-mask geometry. On Retina displays, both patterns
+  scale in physical pixels—not SwiftUI points.
 - **Beams that react to the picture.** Dark detail produces narrow scanlines;
   bright areas excite wider, softer beams instead of receiving identical black
   stripes.
@@ -131,14 +131,14 @@ The current renderer ports Guest Advanced HD's default progressive signal path:
 persistence, color prepass, 1.8-gamma linearization, reconstruction filters,
 beam response, glow/bloom stages, brightness compensation, and the final mask.
 
-Phosphor intentionally selects Guest's type 6 RGB aperture grille instead of
-upstream's type 0 default so the individual emitters remain visible on modern
-Retina panels.
+Phosphor includes Guest's type 6 RGB aperture grille and a staggered slot-mask
+variant. Both share the same beam, brightness-adaptive phosphor response, and
+physical-pixel scaling instead of behaving like unrelated texture presets.
 
 Still to come:
 
 - Pixel-parity fixtures captured from a pinned RetroArch reference renderer
-- Optional color LUTs and the remaining Guest mask patterns
+- Optional color LUTs and the remaining Guest shadow-mask patterns
 - Interlacing and VGA-specific branches
 - Deconvergence and noise controls
 - A redistributable bundled FFmpeg build for signed releases

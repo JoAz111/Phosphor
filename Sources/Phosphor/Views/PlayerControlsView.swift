@@ -11,6 +11,7 @@ struct ControlPreferences: Equatable {
     var curvature: Double
     var scanlines: Double
     var mask: Double
+    var maskPattern: PhosphorMaskPattern
     var glow: Double
     var vignette: Double
 
@@ -22,6 +23,7 @@ struct ControlPreferences: Equatable {
             curvature: Float(curvature),
             scanlines: Float(scanlines),
             mask: Float(mask),
+            maskPattern: maskPattern,
             glow: Float(glow),
             vignette: Float(vignette)
         )
@@ -33,6 +35,7 @@ struct ControlPreferences: Equatable {
         curvature: Double = Double(ShaderSettings.default.curvature),
         scanlines: Double = Double(ShaderSettings.default.scanlines),
         mask: Double = Double(ShaderSettings.default.mask),
+        maskPattern: PhosphorMaskPattern = ShaderSettings.default.maskPattern,
         glow: Double = Double(ShaderSettings.default.glow),
         vignette: Double = Double(ShaderSettings.default.vignette)
     ) {
@@ -41,6 +44,7 @@ struct ControlPreferences: Equatable {
         self.curvature = curvature
         self.scanlines = scanlines
         self.mask = mask
+        self.maskPattern = maskPattern
         self.glow = glow
         self.vignette = vignette
     }

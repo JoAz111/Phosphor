@@ -44,6 +44,13 @@ final class RendererUniformTests: XCTestCase {
         XCTAssertEqual(
             MetalRenderer.guestRasterSize(
                 drawableSize: SIMD2(3_840, 2_160),
+                sourceSize: SIMD2(320, 240)
+            ),
+            SIMD2(320, 240)
+        )
+        XCTAssertEqual(
+            MetalRenderer.guestRasterSize(
+                drawableSize: SIMD2(3_840, 2_160),
                 sourceSize: SIMD2(640, 480)
             ),
             SIMD2(640, 480)
@@ -80,6 +87,7 @@ final class RendererUniformTests: XCTestCase {
             curvature: 0.12,
             scanlines: 0.13,
             mask: 0.14,
+            maskPattern: .slotMask,
             glow: 0.15,
             vignette: 0.16
         )
@@ -96,7 +104,7 @@ final class RendererUniformTests: XCTestCase {
         XCTAssertEqual(uniforms.sourceSize, SIMD4(1_920, 1_080, 1 / 1_920, 1 / 1_080))
         XCTAssertEqual(uniforms.rasterSize, SIMD4(960, 540, 1 / 960, 1 / 540))
         XCTAssertEqual(uniforms.effect, SIMD4(0.11, 0.12, 0.13, 0.14))
-        XCTAssertEqual(uniforms.effect2, SIMD4(0.15, 0.16, 2, 0.20))
+        XCTAssertEqual(uniforms.effect2, SIMD4(0.15, 0.16, 2, 1))
         XCTAssertEqual(uniforms.guestBeam, SIMD4(6.0, 8.0, 1.20, 1.0))
         XCTAssertEqual(uniforms.guestLight, SIMD4(0.34, 0.12, 1.40, 1.10))
         XCTAssertEqual(uniforms.guestColor, SIMD4(1.80, 1.75, 0.20, 0.50))

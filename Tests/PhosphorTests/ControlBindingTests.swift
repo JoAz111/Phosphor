@@ -15,6 +15,7 @@ final class ControlBindingTests: XCTestCase {
             curvature: 1,
             scanlines: -1,
             mask: 2,
+            maskPattern: .slotMask,
             glow: -1,
             vignette: 2
         )
@@ -26,6 +27,7 @@ final class ControlBindingTests: XCTestCase {
                 curvature: 1,
                 scanlines: -1,
                 mask: 2,
+                maskPattern: .slotMask,
                 glow: -1,
                 vignette: 2
             )
@@ -53,6 +55,7 @@ final class ControlBindingTests: XCTestCase {
             curvature: 0.2,
             scanlines: 0.3,
             mask: 0.4,
+            maskPattern: .slotMask,
             glow: 0.5,
             vignette: 0.6
         )

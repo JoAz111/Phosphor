@@ -28,8 +28,9 @@ struct ShaderInspectorView: View {
                 value: $preferences.scanlines,
                 range: 0 ... 1
             )
+            InspectorMaskPatternPicker(pattern: $preferences.maskPattern)
             InspectorSlider(
-                title: "Phosphor Mask",
+                title: "Mask Strength",
                 value: $preferences.mask,
                 range: 0 ... 1
             )
@@ -47,6 +48,27 @@ struct ShaderInspectorView: View {
         .padding(16)
         .frame(width: 280)
         .tint(Color.phosphorGreen)
+    }
+}
+
+private struct InspectorMaskPatternPicker: View {
+    @Binding var pattern: PhosphorMaskPattern
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Mask Pattern")
+
+            Picker("Mask Pattern", selection: $pattern) {
+                ForEach(PhosphorMaskPattern.allCases) { pattern in
+                    Text(pattern.displayName).tag(pattern)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .accessibilityLabel("Mask Pattern")
+            .accessibilityValue(pattern.displayName)
+        }
+        .font(.caption)
     }
 }
 

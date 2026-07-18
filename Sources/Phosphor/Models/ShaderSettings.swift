@@ -1,8 +1,25 @@
+enum PhosphorMaskPattern: Int, CaseIterable, Identifiable, Sendable {
+    case apertureGrille
+    case slotMask
+
+    var id: Int { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .apertureGrille:
+            "Grille"
+        case .slotMask:
+            "Slot"
+        }
+    }
+}
+
 struct ShaderSettings: Sendable, Equatable {
     var intensity: Float
     var curvature: Float
     var scanlines: Float
     var mask: Float
+    var maskPattern: PhosphorMaskPattern
     var glow: Float
     var vignette: Float
 
@@ -17,6 +34,7 @@ struct ShaderSettings: Sendable, Equatable {
         curvature: Float = 0.08,
         scanlines: Float = 0.72,
         mask: Float = 0.42,
+        maskPattern: PhosphorMaskPattern = .apertureGrille,
         glow: Float = 0.18,
         vignette: Float = 0.28
     ) {
@@ -24,6 +42,7 @@ struct ShaderSettings: Sendable, Equatable {
         self.curvature = curvature.sanitized(defaultValue: 0.08, to: 0 ... 0.25)
         self.scanlines = scanlines.sanitized(defaultValue: 0.72, to: 0 ... 1)
         self.mask = mask.sanitized(defaultValue: 0.42, to: 0 ... 1)
+        self.maskPattern = maskPattern
         self.glow = glow.sanitized(defaultValue: 0.18, to: 0 ... 1)
         self.vignette = vignette.sanitized(defaultValue: 0.28, to: 0 ... 1)
     }

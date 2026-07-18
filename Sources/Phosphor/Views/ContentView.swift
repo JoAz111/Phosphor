@@ -13,6 +13,8 @@ struct ContentView: View {
     private var scanlines = ControlPreferences.default.scanlines
     @AppStorage("phosphor.shader.mask")
     private var mask = ControlPreferences.default.mask
+    @AppStorage("phosphor.shader.maskPattern")
+    private var maskPatternRawValue = ControlPreferences.default.maskPattern.rawValue
     @AppStorage("phosphor.shader.glow")
     private var glow = ControlPreferences.default.glow
     @AppStorage("phosphor.shader.vignette")
@@ -146,6 +148,8 @@ struct ContentView: View {
             curvature: curvature,
             scanlines: scanlines,
             mask: mask,
+            maskPattern: PhosphorMaskPattern(rawValue: maskPatternRawValue)
+                ?? .apertureGrille,
             glow: glow,
             vignette: vignette
         )
@@ -160,6 +164,7 @@ struct ContentView: View {
                 curvature = preferences.curvature
                 scanlines = preferences.scanlines
                 mask = preferences.mask
+                maskPatternRawValue = preferences.maskPattern.rawValue
                 glow = preferences.glow
                 vignette = preferences.vignette
             }

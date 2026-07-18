@@ -171,6 +171,43 @@ final class MetalShaderTests: XCTestCase {
         XCTAssertGreaterThan(bluePhosphor.x, bluePhosphor.y + 20)
     }
 
+    func testSlotMaskStaggersSeparatorsAcrossAlternatingTriads() throws {
+        let size = 12
+        let beam = try makeSolidFloatTexture(
+            width: size,
+            height: size,
+            color: SIMD4<Float>(0.25, 0.25, 0.25, 0.20)
+        )
+        let black = try makeSolidFloatTexture(
+            width: size,
+            height: size,
+            color: SIMD4<Float>(0, 0, 0, 1)
+        )
+        let pixels = try render(
+            function: "guestPhosphorMaskFragment",
+            outputSize: SIMD2(size, size),
+            outputFormat: .bgra8Unorm_srgb,
+            textures: [beam, black, black, black, black, black],
+            settings: ShaderSettings(
+                intensity: 1,
+                curvature: 0,
+                scanlines: 1,
+                mask: 1,
+                maskPattern: .slotMask,
+                glow: 0,
+                vignette: 0
+            )
+        )
+
+        let firstTriadTop = bgraPixel(pixels, width: size, x: 6, y: 4)
+        let secondTriadTop = bgraPixel(pixels, width: size, x: 9, y: 4)
+        let firstTriadBottom = bgraPixel(pixels, width: size, x: 6, y: 6)
+        let secondTriadBottom = bgraPixel(pixels, width: size, x: 9, y: 6)
+
+        XCTAssertGreaterThan(secondTriadTop.z, firstTriadTop.z + 20)
+        XCTAssertGreaterThan(firstTriadBottom.z, secondTriadBottom.z + 20)
+    }
+
     func testTubeGlowAddsNeutralBloomAndWarmHalation() throws {
         let size = 12
         let beam = try makeSolidFloatTexture(

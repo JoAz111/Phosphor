@@ -665,6 +665,29 @@ float3 guestApertureMask(
     return mix(darkMask, brightMask, saturate(brightness));
 }
 
+// CRT-Guest-Advanced's slot-mask geometry overlays staggered horizontal
+// separators on the RGB phosphor columns. One triad is three mask cells wide;
+// alternating triads receive separators two rows apart in a four-row period.
+float guestSlotMask(
+    float2 physicalPixel,
+    float brightness,
+    float control,
+    float maskScale
+) {
+    float2 maskCoordinate = floor(physicalPixel / max(maskScale, 1.0));
+    constexpr float slotWidth = 3.0;
+    constexpr float slotHeight = 2.0;
+    float horizontal = floor(fmod(maskCoordinate.x, 2.0 * slotWidth));
+    float vertical = floor(fmod(maskCoordinate.y, 2.0 * slotHeight));
+    bool separator = (vertical == 0.0 && horizontal < slotWidth)
+        || (vertical == slotHeight && horizontal >= slotWidth);
+
+    float depth = saturate(
+        saturate(control) * mix(1.10, 0.72, saturate(brightness))
+    );
+    return separator ? 1.0 - depth : 1.0;
+}
+
 float guestCorner(FittedGeometry fitted, constant ShaderUniforms &uniforms) {
     float2 edge = fitted.tubePosition * fitted.tubePosition;
     float vignetteShape = saturate(dot(edge, edge) * 0.5);
@@ -712,6 +735,15 @@ fragment float4 guestPhosphorMaskFragment(
         uniforms.effect.w,
         uniforms.effect2.z
     );
+    bool usesSlotMask = uniforms.effect2.w > 0.5;
+    if (usesSlotMask) {
+        mask *= guestSlotMask(
+            input.position.xy,
+            maskBrightness,
+            uniforms.effect.w,
+            uniforms.effect2.z
+        );
+    }
 
     float maskGamma = uniforms.guestMask.z;
     float3 color = pow(
@@ -738,7 +770,10 @@ fragment float4 guestPhosphorMaskFragment(
         1.0,
         maskBrightness
     );
-    color *= brightBoost * darkCompensation;
+    float slotCompensation = usesSlotMask
+        ? mix(1.0, 1.12, saturate(uniforms.effect.w))
+        : 1.0;
+    color *= brightBoost * darkCompensation * slotCompensation;
 
     float glowControl = saturate(uniforms.effect2.x);
     float lightResponse = pow(glowControl, 0.65);
