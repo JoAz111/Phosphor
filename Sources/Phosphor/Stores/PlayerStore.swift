@@ -1,6 +1,5 @@
 import AppKit
 import AVFoundation
-import CoreVideo
 import Observation
 import UniformTypeIdentifiers
 
@@ -27,12 +26,19 @@ final class PlayerStore {
     @ObservationIgnored
     private var loadGeneration = 0
 
+    @ObservationIgnored
+    private let assetLoader: PlayerAssetLoading
+
     var hasMedia: Bool {
         currentURL != nil
     }
 
-    init(player: AVPlayer = AVPlayer()) {
+    init(
+        player: AVPlayer = AVPlayer(),
+        assetLoader: @escaping PlayerAssetLoading = AVURLAssetLoader.load(url:)
+    ) {
         self.player = player
+        self.assetLoader = assetLoader
         player.volume = volume
         timeObserver = PlayerTimeObserver(player: player) { [weak self] time in
             MainActor.assumeIsolated {
@@ -41,12 +47,13 @@ final class PlayerStore {
         }
     }
 
-    func load(url: URL) {
+    @discardableResult
+    func load(url: URL) -> Task<Void, Never> {
         loadGeneration += 1
         let generation = loadGeneration
         errorMessage = nil
 
-        Task { [weak self] in
+        return Task { [weak self] in
             await self?.load(url: url, generation: generation)
         }
     }
@@ -76,61 +83,30 @@ final class PlayerStore {
     func seek(to time: TimeInterval) {
         guard hasMedia else { return }
 
-        let target = min(Self.finiteNonnegative(time), duration)
+        let target = Self.clamped(time, upperBound: duration, nanDefault: 0)
         currentTime = target
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
     }
 
     func setVolume(_ newValue: Float) {
-        let sanitized = newValue.isFinite ? newValue : 1
+        let sanitized = newValue.isNaN ? 1 : newValue
         volume = min(max(sanitized, 0), 1)
         player.volume = volume
     }
 
     private func load(url: URL, generation: Int) async {
         do {
-            let asset = AVURLAsset(url: url)
-            async let isPlayable = asset.load(.isPlayable)
-            async let assetDuration = asset.load(.duration)
-            async let videoTracks = asset.loadTracks(withMediaType: .video)
-
-            let (playable, loadedDuration, tracks) = try await (
-                isPlayable,
-                assetDuration,
-                videoTracks
-            )
-            guard playable else {
-                throw PlayerLoadError.notPlayable
-            }
-            guard !tracks.isEmpty else {
-                throw PlayerLoadError.noVideoTrack
-            }
-
-            var characteristics = Set<AVMediaCharacteristic>()
-            for track in tracks {
-                characteristics.formUnion(try await track.load(.mediaCharacteristics))
-            }
-
-            let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String:
-                    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-                kCVPixelBufferMetalCompatibilityKey as String: true
-            ])
-            let item = AVPlayerItem(asset: asset)
-            item.add(output)
-            let colorMetadata = VideoColorMetadata(
-                mediaCharacteristics: characteristics
-            )
+            let prepared = try await assetLoader(url)
 
             guard generation == loadGeneration else { return }
 
-            player.replaceCurrentItem(with: item)
-            videoOutput = output
+            player.replaceCurrentItem(with: prepared.item)
+            videoOutput = prepared.output
             currentURL = url
             currentTime = 0
-            duration = Self.finiteNonnegative(loadedDuration.seconds)
+            duration = Self.finiteNonnegative(prepared.duration)
             errorMessage = nil
-            noticeMessage = colorMetadata.sdrPathNotice
+            noticeMessage = prepared.colorMetadata.sdrPathNotice
             transport = .playing
             player.play()
         } catch is CancellationError {
@@ -157,6 +133,15 @@ final class PlayerStore {
         value.isFinite ? max(value, 0) : 0
     }
 
+    private static func clamped(
+        _ value: TimeInterval,
+        upperBound: TimeInterval,
+        nanDefault: TimeInterval
+    ) -> TimeInterval {
+        let sanitized = value.isNaN ? nanDefault : value
+        return min(max(sanitized, 0), upperBound)
+    }
+
     private static func errorMessage(for error: Error) -> String {
         switch error {
         case PlayerLoadError.notPlayable:
@@ -167,11 +152,6 @@ final class PlayerStore {
             "The video could not be opened."
         }
     }
-}
-
-private enum PlayerLoadError: Error {
-    case notPlayable
-    case noVideoTrack
 }
 
 private final class PlayerTimeObserver {
