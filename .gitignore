@@ -1,0 +1,8 @@
+.DS_Store
+.build/
+dist/
+.swiftpm/
+.codex/
+.superpowers/
+docs/
+*.xcuserstate
