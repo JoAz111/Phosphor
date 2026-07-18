@@ -14,6 +14,7 @@ let package = Package(
         .executableTarget(
             name: "Phosphor",
             resources: [
+                .copy("Resources/Phosphor.icns"),
                 .copy("Resources/PhosphorShaders.metal")
             ]
         ),
