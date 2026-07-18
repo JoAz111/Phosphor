@@ -16,6 +16,13 @@ struct FullscreenVertex {
     float2 uv;
 };
 
+struct FittedGeometry {
+    float2 tubePosition;
+    float2 sourceUV;
+    float2 texelSize;
+    bool visible;
+};
+
 struct CRTGeometry {
     float2 tubePosition;
     float2 sourceUV;
@@ -24,6 +31,7 @@ struct CRTGeometry {
 };
 
 struct LinearRGBInput {
+    float3 raw;
     float3 center;
     float3 left;
     float3 right;
@@ -43,8 +51,8 @@ float3 phosphorSRGBToLinear(float3 color) {
     return select(low, high, color > 0.04045);
 }
 
-CRTGeometry phosphorGeometry(float2 outputUV, constant ShaderUniforms &uniforms) {
-    CRTGeometry result;
+FittedGeometry phosphorAspectFit(float2 outputUV, constant ShaderUniforms &uniforms) {
+    FittedGeometry result;
     result.tubePosition = float2(0.0);
     result.sourceUV = float2(0.5);
     result.texelSize = 1.0 / max(uniforms.sourceSize, float2(1.0));
@@ -68,19 +76,37 @@ CRTGeometry phosphorGeometry(float2 outputUV, constant ShaderUniforms &uniforms)
         return result;
     }
 
-    float2 tube = fittedPosition / fitScale;
-    float cornerDistance = length(max(abs(tube) - 0.94, 0.0));
+    result.tubePosition = fittedPosition / fitScale;
+    result.sourceUV = result.tubePosition * 0.5 + 0.5;
+    result.visible = true;
+    return result;
+}
+
+CRTGeometry phosphorCRTGeometry(
+    FittedGeometry fitted,
+    constant ShaderUniforms &uniforms
+) {
+    CRTGeometry result;
+    result.tubePosition = fitted.tubePosition;
+    result.sourceUV = fitted.sourceUV;
+    result.texelSize = fitted.texelSize;
+    result.visible = false;
+    if (!fitted.visible) {
+        return result;
+    }
+
+    float cornerDistance = length(max(abs(fitted.tubePosition) - 0.94, 0.0));
     if (cornerDistance > 0.06) {
         return result;
     }
 
-    float curvature = saturate(uniforms.effect.y) * dot(tube, tube);
-    float2 curved = tube * (1.0 + curvature);
+    float curvature = saturate(uniforms.effect.y)
+        * dot(fitted.tubePosition, fitted.tubePosition);
+    float2 curved = fitted.tubePosition * (1.0 + curvature);
     if (any(abs(curved) > 1.0)) {
         return result;
     }
 
-    result.tubePosition = tube;
     result.sourceUV = curved * 0.5 + 0.5;
     result.visible = true;
     return result;
@@ -115,34 +141,42 @@ float4 phosphorApplyCRT(
     LinearRGBInput input,
     constant ShaderUniforms &uniforms
 ) {
-    CRTGeometry geometry = phosphorGeometry(outputUV, uniforms);
-    if (!geometry.visible) {
+    FittedGeometry fitted = phosphorAspectFit(outputUV, uniforms);
+    if (!fitted.visible) {
         return float4(0.0, 0.0, 0.0, 1.0);
     }
 
-    float glowAmount = saturate(uniforms.effect2.x);
-    float3 glow = input.center * 0.44
-        + (input.left + input.right + input.up + input.down) * 0.14;
-    float3 treated = mix(input.center, glow, glowAmount * 0.32);
-    treated += glow * (glowAmount * 0.06);
+    CRTGeometry geometry = phosphorCRTGeometry(fitted, uniforms);
+    float3 treated = float3(0.0);
+    if (geometry.visible) {
+        float glowAmount = saturate(uniforms.effect2.x);
+        float3 glow = input.center * 0.44
+            + (input.left + input.right + input.up + input.down) * 0.14;
+        treated = mix(input.center, glow, glowAmount * 0.32);
+        treated += glow * (glowAmount * 0.06);
 
-    float sourceLine = geometry.sourceUV.y * uniforms.sourceSize.y;
-    float scanWave = 0.5 + 0.5 * cos(sourceLine * M_PI_F);
-    float scanModulation = mix(1.0, 0.72 + 0.28 * scanWave, saturate(uniforms.effect.z));
-    treated *= scanModulation;
+        float sourceLine = geometry.sourceUV.y * uniforms.sourceSize.y - 0.5;
+        float scanWave = 0.5 + 0.5 * cos(sourceLine * M_PI_F);
+        float scanModulation = mix(
+            1.0,
+            0.72 + 0.28 * scanWave,
+            saturate(uniforms.effect.z)
+        );
+        treated *= scanModulation;
 
-    uint stripe = uint(max(outputUV.x * uniforms.drawableSize.x, 0.0)) % 3;
-    float3 grille = stripe == 0 ? float3(1.12, 0.94, 0.94)
-        : (stripe == 1 ? float3(0.94, 1.12, 0.94) : float3(0.94, 0.94, 1.12));
-    treated *= mix(float3(1.0), grille, saturate(uniforms.effect.w));
+        uint stripe = uint(max(outputUV.x * uniforms.drawableSize.x, 0.0)) % 3;
+        float3 grille = stripe == 0 ? float3(1.12, 0.94, 0.94)
+            : (stripe == 1 ? float3(0.94, 1.12, 0.94) : float3(0.94, 0.94, 1.12));
+        treated *= mix(float3(1.0), grille, saturate(uniforms.effect.w));
 
-    float2 edge = geometry.tubePosition * geometry.tubePosition;
-    float vignetteShape = saturate(dot(edge, edge) * 0.5);
-    float vignette = 1.0 - saturate(uniforms.effect2.y) * vignetteShape * 0.55;
-    treated *= vignette;
+        float2 edge = geometry.tubePosition * geometry.tubePosition;
+        float vignetteShape = saturate(dot(edge, edge) * 0.5);
+        float vignette = 1.0 - saturate(uniforms.effect2.y) * vignetteShape * 0.55;
+        treated *= vignette;
+    }
 
     float intensity = saturate(uniforms.effect.x);
-    return float4(saturate(mix(input.center, treated, intensity)), 1.0);
+    return float4(saturate(mix(input.raw, treated, intensity)), 1.0);
 }
 
 vertex FullscreenVertex phosphorFullscreenVertex(uint vertexID [[vertex_id]]) {
@@ -159,11 +193,13 @@ fragment float4 phosphorCRTFragmentNV12(
     texture2d<float> lumaTexture [[texture(0)]],
     texture2d<float> chromaTexture [[texture(1)]]
 ) {
-    CRTGeometry geometry = phosphorGeometry(input.uv, uniforms);
+    FittedGeometry fitted = phosphorAspectFit(input.uv, uniforms);
+    CRTGeometry geometry = phosphorCRTGeometry(fitted, uniforms);
     float2 uv = geometry.sourceUV;
     float2 dx = float2(geometry.texelSize.x, 0.0);
     float2 dy = float2(0.0, geometry.texelSize.y);
     LinearRGBInput color = {
+        phosphorSampleNV12(lumaTexture, chromaTexture, fitted.sourceUV, uniforms),
         phosphorSampleNV12(lumaTexture, chromaTexture, uv, uniforms),
         phosphorSampleNV12(lumaTexture, chromaTexture, uv - dx, uniforms),
         phosphorSampleNV12(lumaTexture, chromaTexture, uv + dx, uniforms),
@@ -178,11 +214,13 @@ fragment float4 phosphorCRTFragmentBGRA(
     constant ShaderUniforms &uniforms [[buffer(0)]],
     texture2d<float> colorTexture [[texture(0)]]
 ) {
-    CRTGeometry geometry = phosphorGeometry(input.uv, uniforms);
+    FittedGeometry fitted = phosphorAspectFit(input.uv, uniforms);
+    CRTGeometry geometry = phosphorCRTGeometry(fitted, uniforms);
     float2 uv = geometry.sourceUV;
     float2 dx = float2(geometry.texelSize.x, 0.0);
     float2 dy = float2(0.0, geometry.texelSize.y);
     LinearRGBInput color = {
+        phosphorSampleBGRA(colorTexture, fitted.sourceUV),
         phosphorSampleBGRA(colorTexture, uv),
         phosphorSampleBGRA(colorTexture, uv - dx),
         phosphorSampleBGRA(colorTexture, uv + dx),
