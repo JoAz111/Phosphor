@@ -5,6 +5,7 @@ MODE="${1:-run}"
 APP_NAME="Phosphor"
 BUNDLE_ID="com.joeyazizoff.Phosphor"
 MIN_SYSTEM_VERSION="14.0"
+CONFIGURATION="release"
 
 case "$MODE" in
   run|--verify|verify|--debug|debug|--logs|logs|--telemetry|telemetry)
@@ -14,6 +15,10 @@ case "$MODE" in
     exit 2
     ;;
 esac
+
+if [[ "$MODE" == "--debug" || "$MODE" == "debug" ]]; then
+  CONFIGURATION="debug"
+fi
 
 if [[ $# -gt 1 ]]; then
   echo "usage: $0 [--verify|--debug|--logs|--telemetry]" >&2
@@ -50,9 +55,11 @@ if /usr/bin/pgrep -x "$APP_NAME" >/dev/null 2>&1; then
 fi
 
 swift build \
+  --configuration "$CONFIGURATION" \
   --scratch-path "$SWIFTPM_SCRATCH_DIR" \
   --product "$APP_NAME"
 BUILD_BIN_DIR="$(swift build \
+  --configuration "$CONFIGURATION" \
   --scratch-path "$SWIFTPM_SCRATCH_DIR" \
   --show-bin-path)"
 BUILD_BINARY="$BUILD_BIN_DIR/$APP_NAME"
@@ -88,8 +95,43 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$BUNDLE_ID</string>
   <key>CFBundleName</key>
   <string>$APP_NAME</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Video</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.movie</string>
+        <string>public.audiovisual-content</string>
+      </array>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>mp4</string>
+        <string>mov</string>
+        <string>m4v</string>
+        <string>mkv</string>
+        <string>avi</string>
+        <string>webm</string>
+        <string>mpg</string>
+        <string>mpeg</string>
+        <string>ts</string>
+        <string>m2ts</string>
+        <string>wmv</string>
+        <string>flv</string>
+      </array>
+    </dict>
+  </array>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSPrincipalClass</key>
@@ -97,6 +139,10 @@ cat >"$INFO_PLIST" <<PLIST
 </dict>
 </plist>
 PLIST
+
+/usr/bin/codesign --force --sign - "$APP_BINARY"
+/usr/bin/codesign --force --sign - "$APP_BUNDLE"
+/usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"

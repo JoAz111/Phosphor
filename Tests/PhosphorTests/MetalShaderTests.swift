@@ -83,6 +83,58 @@ final class MetalShaderTests: XCTestCase {
         )
     }
 
+    func testGuestLinearizeUsesUpstreamInputGamma() throws {
+        let encoded = try makeSolidFloatTexture(
+            width: 4,
+            height: 4,
+            color: SIMD4<Float>(0.5, 0.5, 0.5, 1)
+        )
+        let pixels = try render(
+            function: "guestLinearizeFragment",
+            outputSize: SIMD2(4, 4),
+            outputFormat: .rgba16Float,
+            textures: [encoded],
+            settings: .default
+        )
+
+        XCTAssertEqual(
+            halfFloatChannel(pixels, width: 4, x: 2, y: 2, channel: 0),
+            pow(0.5, 1.8),
+            accuracy: 0.002
+        )
+    }
+
+    func testGuestAfterglowStartsWithEmptyPersistence() throws {
+        let source = try makeSolidFloatTexture(
+            width: 4,
+            height: 4,
+            color: SIMD4<Float>(0.8, 0.4, 0.2, 1)
+        )
+        let feedback = try makeSolidFloatTexture(
+            width: 4,
+            height: 4,
+            color: SIMD4<Float>(0.5, 0.5, 0.5, 1)
+        )
+        let pixels = try render(
+            function: "guestAfterglowFragment",
+            outputSize: SIMD2(4, 4),
+            outputFormat: .rgba16Float,
+            textures: [source, feedback],
+            settings: .default
+        )
+
+        XCTAssertEqual(
+            halfFloatChannel(pixels, width: 4, x: 2, y: 2, channel: 0),
+            0,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            halfFloatChannel(pixels, width: 4, x: 2, y: 2, channel: 3),
+            1,
+            accuracy: 0.001
+        )
+    }
+
     func testFinalMaskCreatesSeparateRGBPhosphorsInPhysicalPixels() throws {
         let size = 12
         let beam = try makeSolidFloatTexture(
@@ -99,7 +151,7 @@ final class MetalShaderTests: XCTestCase {
             function: "guestPhosphorMaskFragment",
             outputSize: SIMD2(size, size),
             outputFormat: .bgra8Unorm_srgb,
-            textures: [beam, black, black, black],
+            textures: [beam, black, black, black, black, black],
             settings: ShaderSettings(
                 intensity: 1,
                 curvature: 0,
@@ -126,6 +178,8 @@ final class MetalShaderTests: XCTestCase {
             ("phosphorDecodeFragmentNV12", .rgba16Float),
             ("phosphorDecodeFragmentBGRA", .rgba16Float),
             ("guestAfterglowFragment", .rgba16Float),
+            ("guestPrepassFragment", .rgba16Float),
+            ("guestLinearizeFragment", .rgba16Float),
             ("guestHDSharpenFragment", .rgba16Float),
             ("guestGlowHorizontalFragment", .rgba16Float),
             ("guestGlowVerticalFragment", .rgba16Float),
@@ -300,7 +354,17 @@ final class MetalShaderTests: XCTestCase {
         x: Int,
         y: Int
     ) -> Float {
-        let offset = (y * width + x) * 8
+        halfFloatChannel(pixels, width: width, x: x, y: y, channel: 0)
+    }
+
+    private func halfFloatChannel(
+        _ pixels: [UInt8],
+        width: Int,
+        x: Int,
+        y: Int,
+        channel: Int
+    ) -> Float {
+        let offset = (y * width + x) * 8 + channel * 2
         let bits = UInt16(pixels[offset]) | UInt16(pixels[offset + 1]) << 8
         return Float(Float16(bitPattern: bits))
     }

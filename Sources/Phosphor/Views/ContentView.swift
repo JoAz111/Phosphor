@@ -87,6 +87,11 @@ struct ContentView: View {
             revealControls()
             return true
         }
+        .onOpenURL { url in
+            guard url.isFileURL else { return }
+            store.load(url: url)
+            revealControls()
+        }
         .onChange(of: store.transport) { _, _ in
             revealControls()
         }

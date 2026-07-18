@@ -31,6 +31,9 @@ struct alignas(16) ShaderUniforms {
     float4 effect2;
     float4 guestBeam;
     float4 guestLight;
+    float4 guestColor;
+    float4 guestScan;
+    float4 guestMask;
     float4 yuvRow0;
     float4 yuvRow1;
     float4 yuvRow2;
@@ -136,7 +139,7 @@ FittedGeometry guestWarp(
     return fitted;
 }
 
-float3 phosphorSampleNV12(
+float3 phosphorSampleEncodedNV12(
     texture2d<float> lumaTexture,
     texture2d<float> chromaTexture,
     float2 uv,
@@ -150,13 +153,11 @@ float3 phosphorSampleNV12(
         dot(uniforms.yuvRow1, yuv),
         dot(uniforms.yuvRow2, yuv)
     );
-    return phosphorSRGBToLinear(saturate(encodedRGB));
+    return saturate(encodedRGB);
 }
 
-float3 phosphorSampleBGRA(texture2d<float> colorTexture, float2 uv) {
-    return phosphorSRGBToLinear(saturate(
-        colorTexture.sample(phosphorLinearSampler, uv).rgb
-    ));
+float3 phosphorSampleEncodedBGRA(texture2d<float> colorTexture, float2 uv) {
+    return saturate(colorTexture.sample(phosphorLinearSampler, uv).rgb);
 }
 
 vertex FullscreenVertex phosphorFullscreenVertex(uint vertexID [[vertex_id]]) {
@@ -177,12 +178,12 @@ fragment float4 phosphorBypassFragmentNV12(
     if (!fitted.visible) {
         return float4(0.0, 0.0, 0.0, 1.0);
     }
-    return float4(phosphorSampleNV12(
+    return float4(phosphorSRGBToLinear(phosphorSampleEncodedNV12(
         lumaTexture,
         chromaTexture,
         fitted.sourceUV,
         uniforms
-    ), 1.0);
+    )), 1.0);
 }
 
 fragment float4 phosphorBypassFragmentBGRA(
@@ -194,7 +195,9 @@ fragment float4 phosphorBypassFragmentBGRA(
     if (!fitted.visible) {
         return float4(0.0, 0.0, 0.0, 1.0);
     }
-    return float4(phosphorSampleBGRA(colorTexture, fitted.sourceUV), 1.0);
+    return float4(phosphorSRGBToLinear(
+        phosphorSampleEncodedBGRA(colorTexture, fitted.sourceUV)
+    ), 1.0);
 }
 
 fragment float4 phosphorDecodeFragmentNV12(
@@ -203,7 +206,7 @@ fragment float4 phosphorDecodeFragmentNV12(
     texture2d<float> lumaTexture [[texture(0)]],
     texture2d<float> chromaTexture [[texture(1)]]
 ) {
-    return float4(phosphorSampleNV12(
+    return float4(phosphorSampleEncodedNV12(
         lumaTexture,
         chromaTexture,
         input.uv,
@@ -216,44 +219,117 @@ fragment float4 phosphorDecodeFragmentBGRA(
     constant ShaderUniforms &uniforms [[buffer(0)]],
     texture2d<float> colorTexture [[texture(0)]]
 ) {
-    return float4(phosphorSampleBGRA(colorTexture, input.uv), 1.0);
+    return float4(phosphorSampleEncodedBGRA(colorTexture, input.uv), 1.0);
 }
 
-// Adapted from CRT-Guest-Advanced HD afterglow0.slang. The AVFoundation
-// source texture replaces RetroArch's OriginalHistory0 input.
+// Direct Metal port of afterglow0.slang's default path. Phosphor keeps the
+// previous decoded video frame and the feedback texture explicitly because
+// AVPlayerItemVideoOutput does not provide RetroArch's OriginalHistory0.
 fragment float4 guestAfterglowFragment(
     FullscreenVertex input [[stage_in]],
     constant ShaderUniforms &uniforms [[buffer(0)]],
-    texture2d<float> currentTexture [[texture(0)]],
-    texture2d<float> historyTexture [[texture(1)]]
+    texture2d<float> previousSource [[texture(0)]],
+    texture2d<float> feedbackTexture [[texture(1)]]
 ) {
-    float3 current = currentTexture.sample(phosphorLinearSampler, input.uv).rgb;
     if (uniforms.frameData.y < 0.5) {
-        return float4(current, 1.0);
+        return float4(0.0, 0.0, 0.0, 1.0);
     }
 
     float2 dx = float2(uniforms.rasterSize.z, 0.0);
     float2 dy = float2(0.0, uniforms.rasterSize.w);
-    float3 history0 = historyTexture.sample(phosphorLinearSampler, input.uv).rgb;
-    float3 history1 = historyTexture.sample(phosphorLinearSampler, input.uv - dx).rgb;
-    float3 history2 = historyTexture.sample(phosphorLinearSampler, input.uv + dx).rgb;
-    float3 history3 = historyTexture.sample(phosphorLinearSampler, input.uv - dy).rgb;
-    float3 history4 = historyTexture.sample(phosphorLinearSampler, input.uv + dy).rgb;
-    float3 spread = (2.5 * history0 + history1 + history2 + history3 + history4) / 6.5;
+    float3 source0 = previousSource.sample(phosphorLinearSampler, input.uv).rgb;
+    float3 source1 = previousSource.sample(phosphorLinearSampler, input.uv - dx).rgb;
+    float3 source2 = previousSource.sample(phosphorLinearSampler, input.uv + dx).rgb;
+    float3 source3 = previousSource.sample(phosphorLinearSampler, input.uv - dy).rgb;
+    float3 source4 = previousSource.sample(phosphorLinearSampler, input.uv + dy).rgb;
+    float3 spread = (2.5 * source0 + source1 + source2 + source3 + source4) / 6.5;
+    float3 accumulated = feedbackTexture.sample(
+        phosphorLinearSampler,
+        input.uv
+    ).rgb;
 
     float threshold = 4.0 / 255.0;
     float freshPixel = smoothstep(
         threshold,
         2.0 * threshold,
-        phosphorMaximum(current)
+        phosphorMaximum(source0)
     );
-    float3 persisted = max(mix(spread, history0, 0.81) - 1.25 / 255.0, 0.0);
-    float3 result = mix(
-        max(current, persisted * uniforms.effect2.w),
-        current,
-        freshPixel
+    float3 persisted = max(
+        mix(spread, accumulated, 0.49 + float3(0.32)) - 1.25 / 255.0,
+        0.0
     );
+    float3 result = mix(persisted, spread, freshPixel);
     return float4(result, freshPixel);
+}
+
+float guestPrepassVignette(
+    float2 uv,
+    constant ShaderUniforms &uniforms
+) {
+    float aspect = uniforms.sourceSize.x / max(uniforms.sourceSize.y, 1.0);
+    float2 border = float2(1.0, aspect) * 0.125;
+    float2 position = abs(2.0 * (clamp(uv, 0.0, 1.0) - 0.5));
+    float2 edge = 1.0 - smoothstep(1.0 - border, 1.0, sqrt(position));
+    edge = pow(max(edge, 0.0), float2(0.70));
+    float shaped = sqrt(edge.x * edge.y);
+    return max(mix(1.0, shaped, saturate(uniforms.effect2.y)), 0.0);
+}
+
+// Default CP=0 / CS=0 color path from pre-shaders-afterglow.slang. The LUT
+// branch is intentionally omitted because Guest's default TNTC value is zero.
+fragment float4 guestPrepassFragment(
+    FullscreenVertex input [[stage_in]],
+    constant ShaderUniforms &uniforms [[buffer(0)]],
+    texture2d<float> currentSource [[texture(0)]],
+    texture2d<float> afterglowTexture [[texture(1)]]
+) {
+    float3 source = min(
+        currentSource.sample(phosphorLinearSampler, input.uv).rgb,
+        1.0
+    );
+    float4 afterglow = afterglowTexture.sample(
+        phosphorLinearSampler,
+        input.uv
+    );
+    float afterglowWeight = 1.0 - afterglow.a;
+    float afterglowLength = length(afterglow.rgb);
+    float3 persisted = uniforms.guestColor.z
+        * afterglowWeight
+        * normalize(pow(afterglow.rgb + 0.01, float3(uniforms.guestColor.w)))
+        * afterglowLength;
+
+    const float3x3 profileEBU = float3x3(
+        float3(0.412391, 0.212639, 0.019331),
+        float3(0.357584, 0.715169, 0.119195),
+        float3(0.180481, 0.072192, 0.950532)
+    );
+    const float3x3 toSRGB = float3x3(
+        float3(3.240970, -0.969244, 0.055630),
+        float3(-1.537383, 1.875968, -0.203977),
+        float3(-0.498611, 0.041555, 1.056972)
+    );
+    constexpr float profileGamma = 2.20;
+    float3 color = pow(saturate(source), float3(profileGamma));
+    color = toSRGB * (profileEBU * color);
+    color = pow(max(saturate(color), 0.0), float3(1.0 / profileGamma));
+    color = min(color + persisted, 1.0);
+
+    return float4(color, guestPrepassVignette(input.uv, uniforms));
+}
+
+// linearize-hd.slang's non-interlaced default path. AVFoundation already
+// presents progressive frames, so RetroArch's field-selection branches do not
+// apply here.
+fragment float4 guestLinearizeFragment(
+    FullscreenVertex input [[stage_in]],
+    constant ShaderUniforms &uniforms [[buffer(0)]],
+    texture2d<float> source [[texture(0)]]
+) {
+    float3 encoded = source.sample(phosphorLinearSampler, input.uv).rgb;
+    return float4(
+        pow(max(encoded, 0.0), float3(uniforms.guestColor.x)),
+        1.0 / uniforms.guestColor.x
+    );
 }
 
 float guestHorizontalGaussian(float x) {
@@ -324,12 +400,16 @@ fragment float4 guestGlowHorizontalFragment(
 ) {
     float3 color = 0.0;
     float weightSum = 0.0;
+    float fraction = 0.5 - fract(uniforms.rasterSize.x * input.uv.x);
+    float2 center = (
+        floor(uniforms.rasterSize.xy * input.uv) + 0.5
+    ) * uniforms.rasterSize.zw;
     float2 dx = float2(uniforms.rasterSize.z, 0.0);
     for (int offset = -6; offset <= 6; ++offset) {
-        float weight = guestGaussian(float(offset), 1.20);
+        float weight = guestGaussian(float(offset) + fraction, 1.20);
         color += weight * source.sample(
             phosphorLinearSampler,
-            input.uv + float(offset) * dx
+            center + float(offset) * dx
         ).rgb;
         weightSum += weight;
     }
@@ -343,12 +423,18 @@ fragment float4 guestGlowVerticalFragment(
 ) {
     float3 color = 0.0;
     float weightSum = 0.0;
-    float2 dy = float2(0.0, 1.0 / max(float(source.get_height()), 1.0));
+    float fraction = 0.5 - fract(uniforms.rasterSize.y * input.uv.y);
+    float2 center = float2(
+        input.uv.x,
+        (floor(uniforms.rasterSize.y * input.uv.y) + 0.5)
+            * uniforms.rasterSize.w
+    );
+    float2 dy = float2(0.0, uniforms.rasterSize.w);
     for (int offset = -6; offset <= 6; ++offset) {
-        float weight = guestGaussian(float(offset), 1.20);
+        float weight = guestGaussian(float(offset) + fraction, 1.20);
         color += weight * source.sample(
             phosphorLinearSampler,
-            input.uv + float(offset) * dy
+            center + float(offset) * dy
         ).rgb;
         weightSum += weight;
     }
@@ -362,12 +448,16 @@ fragment float4 guestBloomHorizontalFragment(
 ) {
     float4 color = 0.0;
     float weightSum = 0.0;
+    float fraction = 0.5 - fract(uniforms.rasterSize.x * input.uv.x);
+    float2 center = (
+        floor(uniforms.rasterSize.xy * input.uv) + 0.5
+    ) * uniforms.rasterSize.zw;
     float2 dx = float2(uniforms.rasterSize.z, 0.0);
     for (int offset = -3; offset <= 3; ++offset) {
-        float weight = guestGaussian(float(offset), 0.75);
+        float weight = guestGaussian(float(offset) + fraction, 0.75);
         float3 pixel = source.sample(
             phosphorLinearSampler,
-            input.uv + float(offset) * dx
+            center + float(offset) * dx
         ).rgb;
         float peak = phosphorMaximum(pixel);
         color += weight * float4(pixel, peak * peak * peak);
@@ -384,12 +474,18 @@ fragment float4 guestBloomVerticalFragment(
 ) {
     float4 color = 0.0;
     float weightSum = 0.0;
-    float2 dy = float2(0.0, 1.0 / max(float(source.get_height()), 1.0));
+    float fraction = 0.5 - fract(uniforms.rasterSize.y * input.uv.y);
+    float2 center = float2(
+        input.uv.x,
+        (floor(uniforms.rasterSize.y * input.uv.y) + 0.5)
+            * uniforms.rasterSize.w
+    );
+    float2 dy = float2(0.0, uniforms.rasterSize.w);
     for (int offset = -3; offset <= 3; ++offset) {
-        float weight = guestGaussian(float(offset), 0.60);
+        float weight = guestGaussian(float(offset) + fraction, 0.60);
         float4 pixel = source.sample(
             phosphorLinearSampler,
-            input.uv + float(offset) * dy
+            center + float(offset) * dy
         );
         pixel.a = pixel.a * pixel.a * pixel.a;
         color += weight * pixel;
@@ -412,7 +508,7 @@ float3 guestBeamWeight(
 ) {
     float beamWidth = mix(uniforms.guestBeam.z, uniforms.guestBeam.w, peak);
     float3 saturation = mix(
-        float3(1.0 + 1.5 * uniforms.effect.z),
+        float3(1.0 + uniforms.guestScan.y),
         float3(1.0),
         normalizedColor
     );
@@ -427,7 +523,7 @@ fragment float4 guestHDBeamFragment(
     constant ShaderUniforms &uniforms [[buffer(0)]],
     texture2d<float> sharpened [[texture(0)]],
     texture2d<float> bloomTexture [[texture(1)]],
-    texture2d<float> prepass [[texture(2)]]
+    texture2d<float> linearized [[texture(2)]]
 ) {
     FittedGeometry fitted = guestWarp(phosphorAspectFit(input.uv, uniforms), uniforms);
     if (!fitted.visible) {
@@ -444,8 +540,16 @@ fragment float4 guestHDBeamFragment(
 
     float4 firstSample = sharpened.sample(phosphorLinearSampler, center);
     float4 secondSample = sharpened.sample(phosphorLinearSampler, center + dy);
-    float3 color1 = pow(max(firstSample.rgb, 0.0), float3(2.40 / 2.20));
-    float3 color2 = pow(max(secondSample.rgb, 0.0), float3(2.40 / 2.20));
+    float scanGamma = uniforms.guestScan.w;
+    float gammaInput = uniforms.guestColor.x;
+    float3 color1 = pow(
+        max(firstSample.rgb, 0.0),
+        float3(scanGamma / gammaInput)
+    );
+    float3 color2 = pow(
+        max(secondSample.rgb, 0.0),
+        float3(scanGamma / gammaInput)
+    );
 
     float weightCenter1 = guestBeamCenterWeight(fraction);
     float weightCenter2 = guestBeamCenterWeight(1.0 - fraction);
@@ -453,8 +557,20 @@ fragment float4 guestHDBeamFragment(
         color1 * weightCenter1 + color2 * weightCenter2
     ) / max(weightCenter1 + weightCenter2, 0.00001);
 
-    float peak1 = pow(max(firstSample.a, phosphorMaximum(interpolated)), 1.0);
-    float peak2 = pow(max(secondSample.a, phosphorMaximum(interpolated)), 1.0);
+    float3 spikePeak = max(
+        (float3(firstSample.a) * weightCenter1
+            + float3(secondSample.a) * weightCenter2)
+            / max(weightCenter1 + weightCenter2, 0.00001),
+        interpolated
+    );
+    float peak1 = pow(
+        phosphorMaximum(mix(spikePeak, float3(firstSample.a), uniforms.guestScan.x)),
+        uniforms.guestScan.z
+    );
+    float peak2 = pow(
+        phosphorMaximum(mix(spikePeak, float3(secondSample.a), uniforms.guestScan.x)),
+        uniforms.guestScan.z
+    );
     float shape1 = mix(uniforms.guestBeam.x, uniforms.guestBeam.y, fraction);
     float shape2 = mix(uniforms.guestBeam.x, uniforms.guestBeam.y, 1.0 - fraction);
     float maximum1 = phosphorMaximum(color1) + 0.0000001;
@@ -483,8 +599,14 @@ fragment float4 guestHDBeamFragment(
     }
 
     float3 beam = color1 * weight1 + color2 * weight2;
-    beam = pow(max(beam, 0.0), float3(2.20 / 2.40));
-    float3 smoothImage = prepass.sample(phosphorLinearSampler, fitted.sourceUV).rgb;
+    beam = pow(
+        max(beam, 0.0),
+        float3(gammaInput / scanGamma)
+    );
+    float3 smoothImage = pow(
+        max(interpolated, 0.0),
+        float3(gammaInput / scanGamma)
+    );
     float3 color = mix(smoothImage, beam, saturate(uniforms.effect.z));
 
     // Preserve Guest's peak channel in alpha for brightness-adaptive masks.
@@ -507,7 +629,7 @@ float3 guestApertureMask(
         ? float3(1.0, 0.0, 0.0)
         : (stripe == 1 ? float3(0.0, 1.0, 0.0) : float3(0.0, 0.0, 1.0));
 
-    float strength = 1.0 - pow(1.0 - saturate(control), 2.2);
+    float strength = saturate(control);
     float3 darkMask = saturate(mix(
         float3(1.0),
         emitter,
@@ -516,7 +638,7 @@ float3 guestApertureMask(
     float3 brightMask = saturate(mix(
         float3(1.0),
         emitter,
-        0.55 * strength
+        strength
     ));
     return mix(darkMask, brightMask, saturate(brightness));
 }
@@ -537,9 +659,11 @@ fragment float4 guestPhosphorMaskFragment(
     FullscreenVertex input [[stage_in]],
     constant ShaderUniforms &uniforms [[buffer(0)]],
     texture2d<float> beamTexture [[texture(0)]],
-    texture2d<float> rawTexture [[texture(1)]],
-    texture2d<float> glowTexture [[texture(2)]],
-    texture2d<float> bloomTexture [[texture(3)]]
+    texture2d<float> linearizedTexture [[texture(1)]],
+    texture2d<float> bloomTexture [[texture(2)]],
+    texture2d<float> prepassTexture [[texture(3)]],
+    texture2d<float> glowTexture [[texture(4)]],
+    texture2d<float> rawTexture [[texture(5)]]
 ) {
     FittedGeometry fitted = phosphorAspectFit(input.uv, uniforms);
     FittedGeometry warped = guestWarp(fitted, uniforms);
@@ -551,9 +675,15 @@ fragment float4 guestPhosphorMaskFragment(
     float3 raw = rawTexture.sample(phosphorLinearSampler, warped.sourceUV).rgb;
     float3 bloom = bloomTexture.sample(phosphorLinearSampler, warped.sourceUV).rgb;
     float3 glow = glowTexture.sample(phosphorLinearSampler, warped.sourceUV).rgb;
+    float prepassVignette = prepassTexture.sample(
+        phosphorLinearSampler,
+        clamp(warped.sourceUV, 0.0, 1.0)
+    ).a;
 
-    float brightness = max(beamSample.a, phosphorMaximum(beamSample.rgb));
-    float maskBrightness = pow(saturate(brightness), 1.40 / 2.20);
+    float gammaInput = uniforms.guestColor.x;
+    float colorMaximum = phosphorMaximum(beamSample.rgb);
+    float brightness = max(beamSample.a, colorMaximum);
+    float maskBrightness = pow(saturate(brightness), 1.40 / gammaInput);
     float3 mask = guestApertureMask(
         input.position.xy,
         maskBrightness,
@@ -561,32 +691,55 @@ fragment float4 guestPhosphorMaskFragment(
         uniforms.effect2.z
     );
 
-    constexpr float maskGamma = 2.40;
-    constexpr float inputGamma = 2.20;
-    float3 color = pow(max(beamSample.rgb, 0.0), float3(maskGamma / inputGamma));
+    float maskGamma = uniforms.guestMask.z;
+    float3 color = pow(
+        max(beamSample.rgb, 0.0),
+        float3(maskGamma / gammaInput)
+    );
     color *= mask;
-    color = pow(max(color, 0.0), float3(inputGamma / maskGamma));
+    color = pow(max(min(color, 1.0), 0.0), float3(gammaInput / maskGamma));
 
     float brightBoost = mix(
         uniforms.guestLight.z,
         uniforms.guestLight.w,
         maskBrightness
     );
-    color *= brightBoost;
+    float maskCompensation = 0.40;
+    float lowMaskStrength = uniforms.guestMask.y * saturate(uniforms.effect.w);
+    float darkCompensation = mix(
+        max(
+            saturate(mix(lowMaskStrength, uniforms.effect.w, maskBrightness))
+                - 1.0
+                + maskCompensation,
+            0.0
+        ) + 1.0,
+        1.0,
+        maskBrightness
+    );
+    color *= brightBoost * darkCompensation;
 
     float glowControl = saturate(uniforms.effect2.x);
-    float bloomStrength = uniforms.guestLight.x + 0.24 * glowControl;
-    float halationStrength = uniforms.guestLight.y + 0.15 * glowControl;
-    float glowStrength = 0.04 + 0.32 * glowControl;
+    float glowParameter = glowControl * (0.08 / 0.18);
+    glow = mix(glow, 0.25 * color, colorMaximum);
+    color += 0.5 * glow * glowParameter;
 
-    // Bloom crosses mask boundaries; halation is biased red like light
-    // scattered through a CRT's glass and phosphor substrate.
-    color += bloom * bloomStrength;
-    color += bloom * float3(0.55, 0.18, 0.06) * halationStrength;
-    color += glow * glowStrength;
+    // Bloom and halation remain wired to Guest's defaults (zero). Keeping the
+    // textures in the graph preserves the complete light-transport path for
+    // presets without inventing light that the upstream default does not add.
+    color += bloom * uniforms.guestLight.x;
+    color += bloom * float3(0.55, 0.18, 0.06) * uniforms.guestLight.y;
+    color = min(color, 1.0);
+    color = pow(
+        max(color, 0.0),
+        float3(1.0 / uniforms.guestColor.y)
+    );
+    color *= prepassVignette * guestCorner(warped, uniforms);
 
-    color *= guestCorner(warped, uniforms);
-    float3 treated = saturate(color);
-    float3 result = mix(raw, treated, saturate(uniforms.effect.x));
-    return float4(saturate(result), 1.0);
+    float3 treatedEncoded = saturate(color);
+    float3 resultEncoded = mix(
+        raw,
+        treatedEncoded,
+        saturate(uniforms.effect.x)
+    );
+    return float4(phosphorSRGBToLinear(saturate(resultEncoded)), 1.0);
 }
