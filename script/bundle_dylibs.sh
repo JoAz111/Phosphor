@@ -20,6 +20,10 @@ is_system_dependency() {
   [[ "$1" == /System/* || "$1" == /usr/lib/* ]]
 }
 
+is_embedded_framework_dependency() {
+  [[ "$1" == "@rpath/Sparkle.framework/"* ]]
+}
+
 dependencies() {
   /usr/bin/otool -L "$1" | /usr/bin/tail -n +2 | /usr/bin/awk '{print $1}'
 }
@@ -52,7 +56,8 @@ SEEN_FILE="$(/usr/bin/mktemp -t phosphor-seen-dylibs)"
 trap '/bin/rm -f "$QUEUE_FILE" "$SEEN_FILE"' EXIT
 
 while IFS= read -r dependency; do
-  if is_system_dependency "$dependency"; then
+  if is_system_dependency "$dependency" \
+      || is_embedded_framework_dependency "$dependency"; then
     continue
   fi
   source_path="$(resolve_dependency "$dependency" "$MAIN_BINARY")"
@@ -76,7 +81,8 @@ while queue_entry="$(/usr/bin/sed -n "${line_number}p" "$QUEUE_FILE")"; [[ -n "$
   /usr/bin/install_name_tool -id "@rpath/$destination_name" "$destination"
 
   while IFS= read -r dependency; do
-    if is_system_dependency "$dependency"; then
+    if is_system_dependency "$dependency" \
+        || is_embedded_framework_dependency "$dependency"; then
       continue
     fi
     dependency_name="$(/usr/bin/basename "$dependency")"

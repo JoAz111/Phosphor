@@ -14,6 +14,12 @@ let package = Package(
     products: [
         .executable(name: "Phosphor", targets: ["Phosphor"])
     ],
+    dependencies: [
+        .package(
+            url: "https://github.com/sparkle-project/Sparkle",
+            exact: "2.9.4"
+        )
+    ],
     targets: [
         .target(
             name: "CPhosphorFFmpeg",
@@ -40,7 +46,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "Phosphor",
-            dependencies: ["CPhosphorFFmpeg"],
+            dependencies: [
+                "CPhosphorFFmpeg",
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             resources: [
                 .copy("Resources/Phosphor.icns"),
                 .copy("Resources/PhosphorShaders.metal")
@@ -48,7 +57,14 @@ let package = Package(
         ),
         .testTarget(
             name: "PhosphorTests",
-            dependencies: ["Phosphor", "CPhosphorFFmpeg"]
+            dependencies: ["Phosphor", "CPhosphorFFmpeg"],
+            linkerSettings: [
+                // SwiftPM stages binary frameworks beside the test bundle.
+                .unsafeFlags([
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@loader_path/../../.."
+                ])
+            ]
         )
     ]
 )

@@ -18,6 +18,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/JoAz111/Phosphor/releases/latest"><strong>Download Phosphor</strong></a> ·
   <a href="#build-from-source">Build from source</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#fidelity-and-roadmap">Fidelity</a>
@@ -129,32 +130,57 @@ brew install ffmpeg
 ```
 
 The script creates an optimized, ad-hoc-signed app at `dist/Phosphor.app` and
-launches it. The app icon, compiled Metal library, compatible FFmpeg libraries,
-file declarations, and license notices live inside that `.app`; the resulting
-bundle does not need Homebrew on the destination Mac.
+launches it. The app icon, compiled Metal library, Sparkle updater, compatible
+FFmpeg libraries, file declarations, and license notices live inside that
+`.app`; the resulting bundle does not need Homebrew on the destination Mac.
 
 ### Build a signed GitHub release
 
 The release builder downloads and checksum-verifies pinned FFmpeg 8.1.2 source,
 builds only its local playback libraries for arm64/macOS 14, links them
-statically into Phosphor, enables the hardened runtime, and produces
-`dist/Phosphor.zip`:
+statically into Phosphor, signs Sparkle and all of its nested helpers inside-out,
+enables the hardened runtime, and creates an APFS/LZFSE disk image with an
+`/Applications` link. The version and monotonically increasing build number are
+explicit:
 
 ```sh
-./script/build_release.sh "Developer ID Application: Your Name (TEAMID)"
+./script/build_release.sh 0.1.0 1
 ```
 
-To submit, staple, and repackage it in the same pass, first save notarytool
-credentials in a Keychain profile and provide that profile name:
+The script automatically selects the installed `Developer ID Application`
+identity. It produces `dist/Phosphor-0.1.0.dmg` and an Ed25519-signed
+`dist/appcast.xml`. A build without a notary profile is useful for local release
+validation but must not be published.
+
+For public distribution, save your notarization credentials once. This command
+prompts securely for an app-specific password rather than putting it in shell
+history:
 
 ```sh
-./script/build_release.sh \
-  "Developer ID Application: Your Name (TEAMID)" \
-  "phosphor-notary"
+xcrun notarytool store-credentials "phosphor-notary" \
+  --apple-id "you@example.com" \
+  --team-id "YOURTEAMID"
 ```
 
-The release build contains no FFmpeg executable and no non-system dynamic
-library dependency. Upload `dist/Phosphor.zip` to GitHub Releases.
+Then build, notarize, staple, validate through Gatekeeper, and generate the
+Sparkle appcast in one pass:
+
+```sh
+./script/build_release.sh 0.1.0 1 "phosphor-notary"
+```
+
+To publish both assets as a GitHub Release after committing the release source:
+
+```sh
+./script/publish_release.sh 0.1.0 1 "phosphor-notary"
+```
+
+Phosphor’s feed lives at the latest GitHub Release’s `appcast.xml` asset. Every
+update is protected independently by Apple Developer ID signing and Phosphor’s
+dedicated Sparkle Ed25519 key. The private updater key remains in the developer
+Keychain; back it up securely with Sparkle’s `generate_keys -x` option before
+shipping the first release. The release contains no FFmpeg executable and no
+non-system media-library dependency.
 
 Useful development modes:
 
@@ -170,6 +196,8 @@ Useful development modes:
 - Open a video with **Command-O**, drag and drop, **File → Open Video**, or
   **Open With → Phosphor** in Finder.
 - Play or pause with **Space**.
+- Choose **Phosphor → Check for Updates…** to query the signed GitHub Releases
+  appcast.
 - Seek and change volume from the floating player controls.
 - Use **Bypass CRT Effect** for an immediate source comparison.
 - Choose a Consumer TV, Trinitron, or Studio Monitor tube profile in **Advanced
@@ -289,3 +317,7 @@ FFmpeg 8.1.2 and reproduce the exact library configuration in
 `script/build_ffmpeg.sh`; see [ffmpeg.org](https://ffmpeg.org/) for its source
 and LGPL license information. FFmpeg remains a separate third-party project and
 is not endorsed by or affiliated with Phosphor.
+
+Phosphor uses [Sparkle](https://sparkle-project.org/) 2.9.4 for secure updates
+from GitHub Releases. Sparkle is redistributed under its permissive license,
+included inside the application bundle.

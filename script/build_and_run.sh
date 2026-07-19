@@ -6,6 +6,19 @@ APP_NAME="Phosphor"
 BUNDLE_ID="com.joeyazizoff.Phosphor"
 MIN_SYSTEM_VERSION="14.0"
 CONFIGURATION="release"
+APP_VERSION="${PHOSPHOR_VERSION:-0.1.0}"
+APP_BUILD_NUMBER="${PHOSPHOR_BUILD_NUMBER:-1}"
+SPARKLE_FEED_URL="https://github.com/JoAz111/Phosphor/releases/latest/download/appcast.xml"
+SPARKLE_PUBLIC_ED_KEY="zuRI45WZhuGoRC03nptlqI1ORBNrl2N25s3IJsZZaGA="
+
+if [[ ! "$APP_VERSION" =~ ^[0-9]+([.][0-9]+){1,3}([+-][0-9A-Za-z.-]+)?$ ]]; then
+  echo "error: PHOSPHOR_VERSION must be a dotted release version" >&2
+  exit 2
+fi
+if [[ ! "$APP_BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: PHOSPHOR_BUILD_NUMBER must be a positive integer" >&2
+  exit 2
+fi
 
 case "$MODE" in
   run|--verify|verify|--debug|debug|--logs|logs|--telemetry|telemetry|--package|package)
@@ -76,12 +89,27 @@ BUILD_BIN_DIR="$(swift build \
 BUILD_BINARY="$BUILD_BIN_DIR/$APP_NAME"
 BUILD_RESOURCE_BUNDLE="$BUILD_BIN_DIR/Phosphor_Phosphor.bundle"
 BUILD_ICON="$BUILD_RESOURCE_BUNDLE/Contents/Resources/Phosphor.icns"
+BUILD_SPARKLE_FRAMEWORK="$BUILD_BIN_DIR/Sparkle.framework"
+if [[ ! -d "$BUILD_SPARKLE_FRAMEWORK" ]]; then
+  BUILD_SPARKLE_FRAMEWORK="$BUILD_BIN_DIR/PackageFrameworks/Sparkle.framework"
+fi
 PROJECT_LICENSE="$ROOT_DIR/LICENSE"
+SPARKLE_DISTRIBUTION="$SWIFTPM_SCRATCH_DIR/artifacts/sparkle/Sparkle"
+if [[ ! -d "$SPARKLE_DISTRIBUTION" ]]; then
+  SPARKLE_DISTRIBUTION="$ROOT_DIR/.build/artifacts/sparkle/Sparkle"
+fi
+SPARKLE_LICENSE="$SPARKLE_DISTRIBUTION/LICENSE"
 METAL_SOURCE="$ROOT_DIR/Sources/Phosphor/Resources/PhosphorShaders.metal"
 METAL_AIR="$SWIFTPM_SCRATCH_DIR/PhosphorShaders.air"
 METAL_LIBRARY="$APP_RESOURCES/Phosphor_Phosphor.bundle/Contents/Resources/PhosphorShaders.metallib"
 
-for required_path in "$BUILD_BINARY" "$BUILD_RESOURCE_BUNDLE" "$BUILD_ICON" "$PROJECT_LICENSE"; do
+for required_path in \
+  "$BUILD_BINARY" \
+  "$BUILD_RESOURCE_BUNDLE" \
+  "$BUILD_ICON" \
+  "$BUILD_SPARKLE_FRAMEWORK" \
+  "$PROJECT_LICENSE" \
+  "$SPARKLE_LICENSE"; do
   if [[ ! -e "$required_path" ]]; then
     echo "error: required build artifact is missing: $required_path" >&2
     exit 1
@@ -95,6 +123,11 @@ done
 /bin/cp -R "$BUILD_RESOURCE_BUNDLE" "$APP_RESOURCES/"
 /bin/cp "$BUILD_ICON" "$APP_RESOURCES/Phosphor.icns"
 /bin/cp "$PROJECT_LICENSE" "$APP_RESOURCES/COPYING"
+/usr/bin/ditto --norsrc --noextattr \
+  "$BUILD_SPARKLE_FRAMEWORK" \
+  "$APP_FRAMEWORKS/Sparkle.framework"
+/bin/mkdir -p "$APP_RESOURCES/ThirdParty/Sparkle"
+/bin/cp "$SPARKLE_LICENSE" "$APP_RESOURCES/ThirdParty/Sparkle/LICENSE"
 if [[ -d "$FFMPEG_PREFIX/share/licenses/ffmpeg" ]]; then
   /bin/mkdir -p "$APP_RESOURCES/ThirdParty/FFmpeg"
   /bin/cp -R "$FFMPEG_PREFIX/share/licenses/ffmpeg/." \
@@ -124,9 +157,9 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundleName</key>
   <string>$APP_NAME</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>$APP_BUILD_NUMBER</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleDocumentTypes</key>
@@ -164,6 +197,12 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>SUFeedURL</key>
+  <string>$SPARKLE_FEED_URL</string>
+  <key>SUPublicEDKey</key>
+  <string>$SPARKLE_PUBLIC_ED_KEY</string>
+  <key>SUVerifyUpdateBeforeExtraction</key>
+  <true/>
 </dict>
 </plist>
 PLIST
@@ -177,19 +216,42 @@ else
 fi
 
 /usr/bin/xattr -cr "$STAGED_APP_BUNDLE"
+
+# Sparkle contains executable helpers inside its versioned framework. Sign it
+# inside-out exactly as Sparkle requires; --deep is intentionally not used.
+SPARKLE_FRAMEWORK="$APP_FRAMEWORKS/Sparkle.framework"
+SPARKLE_VERSION_DIR="$SPARKLE_FRAMEWORK/Versions/Current"
+if [[ -d "$SPARKLE_VERSION_DIR/XPCServices/Installer.xpc" ]]; then
+  /usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" \
+    "$SPARKLE_VERSION_DIR/XPCServices/Installer.xpc"
+fi
+if [[ -d "$SPARKLE_VERSION_DIR/XPCServices/Downloader.xpc" ]]; then
+  /usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" \
+    --preserve-metadata=entitlements \
+    "$SPARKLE_VERSION_DIR/XPCServices/Downloader.xpc"
+fi
+/usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" \
+  "$SPARKLE_VERSION_DIR/Autoupdate"
+/usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" \
+  "$SPARKLE_VERSION_DIR/Updater.app"
+/usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" "$SPARKLE_FRAMEWORK"
+
 while IFS= read -r nested_binary; do
   /usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" "$nested_binary"
 done < <(/usr/bin/find "$APP_FRAMEWORKS" -type f -name '*.dylib' -print)
 /usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" "$STAGED_APP_BUNDLE"
 /usr/bin/codesign --verify --deep --strict "$STAGED_APP_BUNDLE"
 
-/bin/mkdir -p "$DIST_DIR"
-/bin/rm -rf "$APP_BUNDLE"
-# Sign before copying into a File Provider-backed workspace. File Provider can
-# attach Finder metadata after the copy even though the sealed files are intact.
-/usr/bin/ditto --norsrc --noextattr "$STAGED_APP_BUNDLE" "$APP_BUNDLE"
-/usr/bin/xattr -cr "$APP_BUNDLE"
-/usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
+if [[ "$MODE" != "--package" && "$MODE" != "package" ]]; then
+  /bin/mkdir -p "$DIST_DIR"
+  /bin/rm -rf "$APP_BUNDLE"
+  # Sign before copying into a File Provider-backed workspace. File Provider
+  # can attach Finder metadata after the copy even though the sealed files are
+  # intact. Release packaging consumes the pristine staging bundle directly.
+  /usr/bin/ditto --norsrc --noextattr "$STAGED_APP_BUNDLE" "$APP_BUNDLE"
+  /usr/bin/xattr -cr "$APP_BUNDLE"
+  /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
+fi
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
@@ -213,7 +275,7 @@ wait_for_process() {
 
 case "$MODE" in
   --package|package)
-    echo "$APP_BUNDLE"
+    echo "$STAGED_APP_BUNDLE"
     ;;
   run)
     open_app
