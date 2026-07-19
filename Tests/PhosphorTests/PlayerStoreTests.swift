@@ -13,6 +13,7 @@ final class PlayerStoreTests: XCTestCase {
         XCTAssertEqual(store.currentTime, 0)
         XCTAssertEqual(store.duration, 0)
         XCTAssertEqual(store.nominalFrameRate, 0)
+        XCTAssertEqual(store.scanMetadata, .progressive)
         XCTAssertEqual(store.volume, 1)
         XCTAssertNil(store.videoOutput)
         XCTAssertNil(store.currentURL)
@@ -120,6 +121,19 @@ final class PlayerStoreTests: XCTestCase {
         XCTAssertEqual(store.duration, 20)
         XCTAssertEqual(store.nominalFrameRate, 29.97, accuracy: 0.001)
         XCTAssertNil(store.errorMessage)
+    }
+
+    func testLoadedAssetCarriesFieldOrderIntoRendererState() async {
+        let metadata = VideoScanMetadata(fieldOrder: .bottomFirst)
+        let prepared = makePreparedPlayerAsset(
+            duration: 30,
+            scanMetadata: metadata
+        )
+        let store = PlayerStore(assetLoader: { _ in prepared })
+
+        await store.load(url: Self.url("interlaced")).value
+
+        XCTAssertEqual(store.scanMetadata, metadata)
     }
 
     func testOlderFailedLoadCannotSurfaceStaleError() async {
@@ -278,6 +292,7 @@ private final class ControlledPlayerAssetLoader {
 private func makePreparedPlayerAsset(
     duration: TimeInterval,
     nominalFrameRate: Float = 0,
+    scanMetadata: VideoScanMetadata = .progressive,
     metadata: VideoColorMetadata = VideoColorMetadata(mediaCharacteristics: []),
     preparation: MediaPreparation = .native
 ) -> PreparedPlayerAsset {
@@ -289,6 +304,7 @@ private func makePreparedPlayerAsset(
         output: output,
         duration: duration,
         nominalFrameRate: nominalFrameRate,
+        scanMetadata: scanMetadata,
         colorMetadata: metadata,
         preparation: preparation
     )

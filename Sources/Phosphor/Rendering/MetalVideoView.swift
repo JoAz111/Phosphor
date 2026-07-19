@@ -12,12 +12,14 @@ final class MetalVideoView: NSView {
     private var configuredSettings = ShaderSettings.default
     private var configuredPresentationTime: TimeInterval = 0
     private var configuredNominalFrameRate: Float = 0
+    private var configuredScanMetadata = VideoScanMetadata.progressive
     private var requestsEDRPhosphors = true
     private var displayConfiguration: DisplayConfiguration?
 
     private struct DisplayConfiguration: Equatable {
         let usesEDR: Bool
         let headroom: Float
+        let maximumFrameRate: Float
 
         var pixelFormat: MTLPixelFormat {
             usesEDR ? .rgba16Float : .bgra8Unorm_srgb
@@ -65,19 +67,23 @@ final class MetalVideoView: NSView {
         settings: ShaderSettings,
         presentationTime: TimeInterval,
         nominalFrameRate: Float,
+        scanMetadata: VideoScanMetadata,
         edrPhosphors: Bool
     ) {
         configuredOutput = output
         configuredSettings = settings
         configuredPresentationTime = presentationTime
         configuredNominalFrameRate = nominalFrameRate
+        configuredScanMetadata = scanMetadata
         requestsEDRPhosphors = edrPhosphors
         updateDisplayConfigurationIfNeeded()
         renderer?.configure(
             output: output,
             settings: settings,
             edrHeadroom: displayConfiguration?.headroom ?? 1,
-            nominalFrameRate: nominalFrameRate
+            nominalFrameRate: nominalFrameRate,
+            scanMetadata: scanMetadata,
+            maximumDisplayFrameRate: displayConfiguration?.maximumFrameRate ?? 60
         )
         renderer?.requestPresentation(at: presentationTime)
     }
@@ -103,6 +109,12 @@ final class MetalVideoView: NSView {
             name: NSWindow.didChangeScreenNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowOcclusionDidChange(_:)),
+            name: NSWindow.didChangeOcclusionStateNotification,
+            object: nil
+        )
         updateDisplayConfigurationIfNeeded()
         updateDrawableSize()
     }
@@ -111,6 +123,18 @@ final class MetalVideoView: NSView {
     private func windowScreenDidChange(_ notification: Notification) {
         guard notification.object as? NSWindow === window else { return }
         updateDisplayConfigurationIfNeeded()
+    }
+
+    @objc
+    private func windowOcclusionDidChange(_ notification: Notification) {
+        guard notification.object as? NSWindow === window else { return }
+        updateDisplayLinkState()
+    }
+
+    /// Stops display-rate CRT work when SwiftUI dismantles this presentation.
+    func stopPresentation() {
+        requestedActive = false
+        renderer?.setActive(false, isVisible: false)
     }
 
     private func updateDisplayConfigurationIfNeeded() {
@@ -123,7 +147,8 @@ final class MetalVideoView: NSView {
         let usesEDR = requestsEDRPhosphors && potentialHeadroom > 1
         let updatedConfiguration = DisplayConfiguration(
             usesEDR: usesEDR,
-            headroom: usesEDR ? min(max(potentialHeadroom, 1), 2) : 1
+            headroom: usesEDR ? min(max(potentialHeadroom, 1), 2) : 1,
+            maximumFrameRate: Float(window?.screen?.maximumFramesPerSecond ?? 60)
         )
         guard displayConfiguration != updatedConfiguration else { return }
 
@@ -145,7 +170,9 @@ final class MetalVideoView: NSView {
             output: configuredOutput,
             settings: configuredSettings,
             edrHeadroom: updatedConfiguration.headroom,
-            nominalFrameRate: configuredNominalFrameRate
+            nominalFrameRate: configuredNominalFrameRate,
+            scanMetadata: configuredScanMetadata,
+            maximumDisplayFrameRate: updatedConfiguration.maximumFrameRate
         )
         renderer?.requestPresentation(at: configuredPresentationTime)
         updateDrawableSize()
@@ -174,6 +201,7 @@ final class MetalVideoView: NSView {
     }
 
     private func updateDisplayLinkState() {
-        renderer?.setActive(requestedActive && window != nil)
+        let isVisible = window?.occlusionState.contains(.visible) == true
+        renderer?.setActive(requestedActive, isVisible: isVisible)
     }
 }

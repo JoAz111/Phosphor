@@ -38,6 +38,9 @@ struct alignas(16) ShaderUniforms {
     float4 yuvRow1;
     float4 yuvRow2;
     float4 frameData;
+    float4 temporalData;
+    float4 tubeData;
+    float4 videoData;
 };
 
 struct FullscreenVertex {
@@ -147,6 +150,18 @@ FittedGeometry guestWarp(
         position.y * rsqrt(max(1.0 - curveShape * position.x * position.x, 0.001))
     );
     position = mix(position, curved, float2(curve / curveShape));
+    // A real horizontal deflection stage never holds phase with mathematical
+    // precision. Keep the displacement sub-pixel and mostly near the edges.
+    float edgeLoad = smoothstep(0.35, 1.0, abs(position.y));
+    float lineJitter = sin(
+        uniforms.temporalData.x * 67.0
+        + position.y * uniforms.rasterSize.y * 2.39996
+    );
+    position.x += lineJitter
+        * edgeLoad
+        * (0.08 + 0.12 * uniforms.tubeData.z)
+        * uniforms.drawableSize.z
+        * 2.0;
     if (any(abs(position) > 1.0)) {
         fitted.visible = false;
         return fitted;
@@ -176,6 +191,72 @@ float3 phosphorSampleEncodedNV12(
 
 float3 phosphorSampleEncodedBGRA(texture2d<float> colorTexture, float2 uv) {
     return saturate(colorTexture.sample(phosphorLinearSampler, uv).rgb);
+}
+
+// Reconstructs the bandwidth and channel coupling of the selected analog input.
+// RGB remains untouched; S-Video shares only chroma bandwidth, while composite
+// adds asymmetric chroma delay, carrier-dependent dot crawl, and cross-color.
+float3 guestAnalogSignal(
+    float3 center,
+    float3 left,
+    float3 right,
+    float3 farLeft,
+    float3 farRight,
+    float2 uv,
+    constant ShaderUniforms &uniforms
+) {
+    float signalType = uniforms.videoData.z;
+    if (signalType < 0.5) {
+        return center;
+    }
+
+    constexpr float3 lumaWeights = float3(0.299, 0.587, 0.114);
+    float centerLuma = dot(center, lumaWeights);
+    float leftLuma = dot(left, lumaWeights);
+    float rightLuma = dot(right, lumaWeights);
+    float farLeftLuma = dot(farLeft, lumaWeights);
+    float farRightLuma = dot(farRight, lumaWeights);
+    float3 centerChroma = center - centerLuma;
+    float3 chroma = (
+        (left - leftLuma)
+        + 2.0 * centerChroma
+        + (right - rightLuma)
+    ) * 0.25;
+    if (signalType < 1.5) {
+        return saturate(centerLuma + chroma);
+    }
+
+    float luma = 0.08 * farLeftLuma
+        + 0.18 * leftLuma
+        + 0.48 * centerLuma
+        + 0.18 * rightLuma
+        + 0.08 * farRightLuma;
+    float3 delayedChroma = (
+        2.0 * (farLeft - farLeftLuma)
+        + 3.0 * (left - leftLuma)
+        + 2.0 * centerChroma
+        + (right - rightLuma)
+    ) / 8.0;
+
+    float sourceLine = floor(uv.y * uniforms.sourceSize.y);
+    float carrier = uv.x * uniforms.sourceSize.x * 1.5707963
+        + uniforms.frameData.x * 1.5707963;
+    bool usesPAL = signalType > 2.5;
+    if (usesPAL && fmod(sourceLine, 2.0) >= 1.0) {
+        delayedChroma *= 0.96;
+        carrier += 3.1415927;
+    }
+
+    float horizontalEdge = rightLuma - leftLuma;
+    float crawl = sin(carrier);
+    float3 crossColor = horizontalEdge
+        * crawl
+        * (usesPAL ? 0.018 : 0.035)
+        * float3(0.85, -0.34, 0.72);
+    float3 dotCrawl = delayedChroma
+        * cos(carrier * 0.5 + sourceLine * 1.5707963)
+        * (usesPAL ? 0.018 : 0.032);
+    return saturate(luma + delayedChroma + crossColor + dotCrawl);
 }
 
 vertex FullscreenVertex phosphorFullscreenVertex(uint vertexID [[vertex_id]]) {
@@ -421,11 +502,21 @@ fragment GuestFramePreparationOutput guestPrepareFrameNV12Fragment(
     texture2d<float> previousSource [[texture(2)]],
     texture2d<float> feedbackTexture [[texture(3)]]
 ) {
+    float2 dx = float2(uniforms.sourceSize.z, 0.0);
+    float3 center = phosphorSampleEncodedNV12(
+        lumaTexture,
+        chromaTexture,
+        input.uv,
+        uniforms
+    );
     return guestPrepareFrame(
         input.uv,
-        phosphorSampleEncodedNV12(
-            lumaTexture,
-            chromaTexture,
+        guestAnalogSignal(
+            center,
+            phosphorSampleEncodedNV12(lumaTexture, chromaTexture, input.uv - dx, uniforms),
+            phosphorSampleEncodedNV12(lumaTexture, chromaTexture, input.uv + dx, uniforms),
+            phosphorSampleEncodedNV12(lumaTexture, chromaTexture, input.uv - 2.0 * dx, uniforms),
+            phosphorSampleEncodedNV12(lumaTexture, chromaTexture, input.uv + 2.0 * dx, uniforms),
             input.uv,
             uniforms
         ),
@@ -442,9 +533,19 @@ fragment GuestFramePreparationOutput guestPrepareFrameBGRAFragment(
     texture2d<float> previousSource [[texture(1)]],
     texture2d<float> feedbackTexture [[texture(2)]]
 ) {
+    float2 dx = float2(uniforms.sourceSize.z, 0.0);
+    float3 center = phosphorSampleEncodedBGRA(colorTexture, input.uv);
     return guestPrepareFrame(
         input.uv,
-        phosphorSampleEncodedBGRA(colorTexture, input.uv),
+        guestAnalogSignal(
+            center,
+            phosphorSampleEncodedBGRA(colorTexture, input.uv - dx),
+            phosphorSampleEncodedBGRA(colorTexture, input.uv + dx),
+            phosphorSampleEncodedBGRA(colorTexture, input.uv - 2.0 * dx),
+            phosphorSampleEncodedBGRA(colorTexture, input.uv + 2.0 * dx),
+            input.uv,
+            uniforms
+        ),
         uniforms,
         previousSource,
         feedbackTexture
@@ -670,8 +771,57 @@ float4 guestReconstructBeam(
     );
     float2 dy = float2(0.0, uniforms.rasterSize.w);
 
-    float4 firstSample = sharpened.sample(phosphorLinearSampler, center);
-    float4 secondSample = sharpened.sample(phosphorLinearSampler, center + dy);
+    float radialLoad = saturate(dot(
+        fitted.tubePosition * fitted.tubePosition,
+        float2(0.55, 0.45)
+    ));
+    float convergence = uniforms.tubeData.y * radialLoad * 1.6;
+    float focus = uniforms.tubeData.z * radialLoad * radialLoad;
+    float2 convergenceOffset = float2(
+        uniforms.rasterSize.z * max(convergence, 0.75 * focus),
+        0.0
+    );
+
+    float4 firstCenter = sharpened.sample(phosphorLinearSampler, center);
+    float4 firstLeft = sharpened.sample(
+        phosphorLinearSampler,
+        center - convergenceOffset
+    );
+    float4 firstRight = sharpened.sample(
+        phosphorLinearSampler,
+        center + convergenceOffset
+    );
+    float4 firstConverged = mix(
+        firstCenter,
+        float4(firstLeft.r, firstCenter.g, firstRight.b, firstCenter.a),
+        saturate(convergence)
+    );
+    float4 firstSample = mix(
+        firstConverged,
+        0.25 * (firstLeft + 2.0 * firstCenter + firstRight),
+        focus
+    );
+
+    float2 secondCenterUV = center + dy;
+    float4 secondCenter = sharpened.sample(phosphorLinearSampler, secondCenterUV);
+    float4 secondLeft = sharpened.sample(
+        phosphorLinearSampler,
+        secondCenterUV - convergenceOffset
+    );
+    float4 secondRight = sharpened.sample(
+        phosphorLinearSampler,
+        secondCenterUV + convergenceOffset
+    );
+    float4 secondConverged = mix(
+        secondCenter,
+        float4(secondLeft.r, secondCenter.g, secondRight.b, secondCenter.a),
+        saturate(convergence)
+    );
+    float4 secondSample = mix(
+        secondConverged,
+        0.25 * (secondLeft + 2.0 * secondCenter + secondRight),
+        focus
+    );
     float scanGamma = uniforms.guestScan.w;
     float gammaInput = uniforms.guestColor.x;
     float3 color1 = pow(
@@ -682,6 +832,28 @@ float4 guestReconstructBeam(
         max(secondSample.rgb, 0.0),
         float3(scanGamma / gammaInput)
     );
+
+    if (uniforms.videoData.x > 0.5) {
+        int firstLine = int(floor(rasterPosition));
+        int activeParity = uniforms.videoData.y > 0.5 ? 1 : 0;
+        // The panel displays a time-integrated field exposure, not a camera's
+        // instantaneous view between electron-beam sweeps. Retain most of the
+        // opposite field's perceived energy while the temporal state still
+        // receives the stronger active-field excitation.
+        float fieldExposure = mix(
+            0.96,
+            0.995,
+            saturate(uniforms.tubeData.x)
+        );
+        if ((firstLine & 1) != activeParity) {
+            color1 *= fieldExposure;
+            firstSample.a *= fieldExposure;
+        }
+        if (((firstLine + 1) & 1) != activeParity) {
+            color2 *= fieldExposure;
+            secondSample.a *= fieldExposure;
+        }
+    }
 
     float weightCenter1 = guestBeamCenterWeight(fraction);
     float weightCenter2 = guestBeamCenterWeight(1.0 - fraction);
@@ -759,56 +931,93 @@ fragment float4 guestHDBeamFragment(
     return guestReconstructBeam(fitted, uniforms, sharpened);
 }
 
-// CRT-Guest-Advanced aperture-grille mask type 6. The brightness-dependent
-// mixing is what makes dark phosphors discrete while allowing highlights to
-// spread naturally into neighboring phosphors.
+float guestRoundedEmitter(
+    float2 localCoordinate,
+    float2 halfExtent,
+    float softness
+) {
+    float2 distance = abs(localCoordinate - 0.5) - halfExtent;
+    float signedDistance = length(max(distance, 0.0))
+        + min(max(distance.x, distance.y), 0.0);
+    return 1.0 - smoothstep(-softness, softness, signedDistance);
+}
+
+float3 guestEmitterColor(float subphosphor) {
+    return subphosphor < 0.5
+        ? float3(1.0, 0.0, 0.0)
+        : (subphosphor < 1.5
+            ? float3(0.0, 1.0, 0.0)
+            : float3(0.0, 0.0, 1.0));
+}
+
+// Aperture grilles are continuous vertical phosphor stripes separated by the
+// black grille wires. Bright beam spots grow laterally into the wire region.
 float3 guestApertureMask(
     float2 physicalPixel,
     float brightness,
     float control,
     float maskScale
 ) {
-    float2 maskCoordinate = floor(physicalPixel / max(maskScale, 1.0));
-    uint stripe = uint(fmod(maskCoordinate.x, 3.0));
-    float3 emitter = stripe == 0
-        ? float3(1.0, 0.0, 0.0)
-        : (stripe == 1 ? float3(0.0, 1.0, 0.0) : float3(0.0, 0.0, 1.0));
-
+    float scale = max(maskScale, 1.0);
+    float2 maskCoordinate = physicalPixel / scale;
+    float subphosphor = floor(fmod(maskCoordinate.x, 3.0));
+    float3 emitterColor = guestEmitterColor(subphosphor);
+    float localX = fract(maskCoordinate.x);
+    float halfWidth = mix(0.31, 0.47, saturate(brightness));
+    float wireSoftness = 0.16 / scale;
+    float stripe = 1.0 - smoothstep(
+        halfWidth - wireSoftness,
+        halfWidth + wireSoftness,
+        abs(localX - 0.5)
+    );
+    float spill = smoothstep(0.45, 1.0, brightness)
+        * (1.0 - stripe)
+        * 0.08;
+    float3 phosphors = emitterColor * stripe + spill;
     float strength = saturate(control);
-    float3 darkMask = saturate(mix(
-        float3(1.0),
-        emitter,
-        1.10 * strength
-    ));
-    float3 brightMask = saturate(mix(
-        float3(1.0),
-        emitter,
-        strength
-    ));
-    return mix(darkMask, brightMask, saturate(brightness));
+    return saturate(mix(float3(1.0), phosphors, strength));
 }
 
-// CRT-Guest-Advanced's slot-mask geometry overlays staggered horizontal
-// separators on the RGB phosphor columns. One triad is three mask cells wide;
-// alternating triads receive separators two rows apart in a four-row period.
-float guestSlotMask(
+// A slot mask is a two-dimensional shadow-mask lattice, not an aperture grille
+// with dark horizontal lines. Each triad contains separate rounded R/G/B slots;
+// adjacent triads are vertically staggered like brickwork, and a black matrix
+// surrounds every individual phosphor deposit in both axes.
+float3 guestSlotPhosphorMask(
     float2 physicalPixel,
     float brightness,
     float control,
     float maskScale
 ) {
-    float2 maskCoordinate = floor(physicalPixel / max(maskScale, 1.0));
-    constexpr float slotWidth = 3.0;
-    constexpr float slotHeight = 2.0;
-    float horizontal = floor(fmod(maskCoordinate.x, 2.0 * slotWidth));
-    float vertical = floor(fmod(maskCoordinate.y, 2.0 * slotHeight));
-    bool separator = (vertical == 0.0 && horizontal < slotWidth)
-        || (vertical == slotHeight && horizontal >= slotWidth);
-
-    float depth = saturate(
-        saturate(control) * mix(1.10, 0.72, saturate(brightness))
+    float scale = max(maskScale, 1.0);
+    float2 maskCoordinate = physicalPixel / scale;
+    float triad = floor(maskCoordinate.x / 3.0);
+    float subphosphor = floor(fmod(maskCoordinate.x, 3.0));
+    float stagger = fmod(abs(triad), 2.0) * 0.5;
+    constexpr float slotPitch = 4.0;
+    float2 local = float2(
+        fract(maskCoordinate.x),
+        fract(maskCoordinate.y / slotPitch + stagger)
     );
-    return separator ? 1.0 - depth : 1.0;
+    float energy = saturate(brightness);
+    float2 halfExtent = float2(
+        mix(0.23, 0.38, energy),
+        mix(0.34, 0.46, energy)
+    );
+    float softness = 0.13 / scale;
+    float slot = guestRoundedEmitter(local, halfExtent, softness);
+    float halo = guestRoundedEmitter(
+        local,
+        min(halfExtent + float2(0.08, 0.055), float2(0.49)),
+        softness * 1.4
+    );
+    float3 emitterColor = guestEmitterColor(subphosphor);
+    float spill = (halo - slot) * energy * 0.11;
+    float3 phosphors = emitterColor * slot + spill;
+    return saturate(mix(
+        float3(1.0),
+        phosphors,
+        saturate(control)
+    ));
 }
 
 float guestCorner(FittedGeometry fitted, constant ShaderUniforms &uniforms) {
@@ -823,14 +1032,14 @@ float guestCorner(FittedGeometry fitted, constant ShaderUniforms &uniforms) {
 
 // Port/adaptation of deconvergence-hd.slang's final physical-pixel mask,
 // brightness compensation, bloom, glow, and glass integration.
-fragment float4 guestPhosphorMaskFragment(
-    FullscreenVertex input [[stage_in]],
-    constant ShaderUniforms &uniforms [[buffer(0)]],
-    texture2d<float> sharpenedTexture [[texture(0)]],
-    texture2d<float> bloomTexture [[texture(1)]],
-    texture2d<float> prepassLinearizedTexture [[texture(2)]],
-    texture2d<float> glowTexture [[texture(3)]],
-    texture2d<float> rawTexture [[texture(4)]]
+float4 guestTubeSample(
+    FullscreenVertex input,
+    constant ShaderUniforms &uniforms,
+    texture2d<float> sharpenedTexture,
+    texture2d<float> bloomTexture,
+    texture2d<float> prepassLinearizedTexture,
+    texture2d<float> glowTexture,
+    texture2d<float> rawTexture
 ) {
     FittedGeometry fitted = phosphorAspectFit(input.uv, uniforms);
     FittedGeometry warped = guestWarp(fitted, uniforms);
@@ -855,15 +1064,17 @@ fragment float4 guestPhosphorMaskFragment(
     float colorMaximum = phosphorMaximum(beamSample.rgb);
     float brightness = max(beamSample.a, colorMaximum);
     float maskBrightness = pow(saturate(brightness), 1.40 / gammaInput);
-    float3 mask = guestApertureMask(
-        input.position.xy,
-        maskBrightness,
-        uniforms.effect.w,
-        uniforms.effect2.z
-    );
     bool usesSlotMask = guestUsesSlotMask;
+    float3 mask;
     if (usesSlotMask) {
-        mask *= guestSlotMask(
+        mask = guestSlotPhosphorMask(
+            input.position.xy,
+            maskBrightness,
+            uniforms.effect.w,
+            uniforms.effect2.z
+        );
+    } else {
+        mask = guestApertureMask(
             input.position.xy,
             maskBrightness,
             uniforms.effect.w,
@@ -952,4 +1163,99 @@ fragment float4 guestPhosphorMaskFragment(
         * edrResponse
         * saturate(uniforms.effect.x);
     return float4(min(resultLinear * edrGain, headroom), 1.0);
+}
+
+// Static entry point retained for deterministic shader tests and tooling. The
+// app uses the temporal MRT entry point below for live CRT presentation.
+fragment float4 guestPhosphorMaskFragment(
+    FullscreenVertex input [[stage_in]],
+    constant ShaderUniforms &uniforms [[buffer(0)]],
+    texture2d<float> sharpenedTexture [[texture(0)]],
+    texture2d<float> bloomTexture [[texture(1)]],
+    texture2d<float> prepassLinearizedTexture [[texture(2)]],
+    texture2d<float> glowTexture [[texture(3)]],
+    texture2d<float> rawTexture [[texture(4)]]
+) {
+    return guestTubeSample(
+        input,
+        uniforms,
+        sharpenedTexture,
+        bloomTexture,
+        prepassLinearizedTexture,
+        glowTexture,
+        rawTexture
+    );
+}
+
+struct GuestTemporalOutput {
+    float4 excitation [[color(0)]];
+    float4 display [[color(1)]];
+};
+
+// A CRT is a time-domain device. The beam excites only the region swept since
+// the previous display presentation; the native-resolution state texture then
+// decays with separate red, green, and blue phosphor time constants.
+fragment GuestTemporalOutput guestPhosphorTemporalFragment(
+    FullscreenVertex input [[stage_in]],
+    constant ShaderUniforms &uniforms [[buffer(0)]],
+    texture2d<float> sharpenedTexture [[texture(0)]],
+    texture2d<float> bloomTexture [[texture(1)]],
+    texture2d<float> prepassLinearizedTexture [[texture(2)]],
+    texture2d<float> glowTexture [[texture(3)]],
+    texture2d<float> rawTexture [[texture(4)]],
+    texture2d<float> previousExcitation [[texture(5)]]
+) {
+    float4 instantaneous = guestTubeSample(
+        input,
+        uniforms,
+        sharpenedTexture,
+        bloomTexture,
+        prepassLinearizedTexture,
+        glowTexture,
+        rawTexture
+    );
+
+    float persistence = saturate(uniforms.tubeData.x);
+    float3 lifetime = mix(
+        float3(0.010, 0.014, 0.008),
+        float3(0.030, 0.050, 0.022),
+        persistence
+    );
+    float3 decay = exp(-uniforms.temporalData.y / lifetime);
+    float3 state = instantaneous.rgb;
+    if (uniforms.videoData.w >= 0.5) {
+        float3 previous = previousExcitation.sample(
+            phosphorLinearSampler,
+            input.uv
+        ).rgb;
+        float3 decayed = previous * decay;
+        float distanceBehindBeam = fract(
+            uniforms.temporalData.z - input.uv.y + 1.0
+        );
+        float edgeWidth = max(2.0 * uniforms.drawableSize.w, 0.00001);
+        float swept = 1.0 - smoothstep(
+            uniforms.temporalData.w - edgeWidth,
+            uniforms.temporalData.w + edgeWidth,
+            distanceBehindBeam
+        );
+        float3 excited = max(decayed, instantaneous.rgb);
+        state = mix(decayed, excited, swept);
+    }
+
+    GuestTemporalOutput output;
+    output.excitation = float4(state, 1.0);
+    // A Retina panel holds each rendered frame, whereas a CRT emits a brief
+    // light pulse that the eye integrates over the raster interval. Present a
+    // near-steady exposure floor from the current beam solution while keeping
+    // the raw excitation texture free to decay during motion and scene cuts.
+    float exposureFloor = mix(0.985, 0.998, persistence);
+    float3 integratedPresentation = max(
+        state,
+        instantaneous.rgb * exposureFloor
+    );
+    output.display = float4(
+        min(integratedPresentation, max(uniforms.frameData.z, 1.0)),
+        1.0
+    );
+    return output;
 }

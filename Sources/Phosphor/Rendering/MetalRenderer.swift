@@ -20,6 +20,9 @@ struct ShaderUniforms {
     var yuvRow1: SIMD4<Float>
     var yuvRow2: SIMD4<Float>
     var frameData: SIMD4<Float>
+    var temporalData: SIMD4<Float>
+    var tubeData: SIMD4<Float>
+    var videoData: SIMD4<Float>
 
     init(
         drawableSize: SIMD2<Float>,
@@ -29,7 +32,14 @@ struct ShaderUniforms {
         yuvConversion: YUVConversion,
         frameCount: UInt64 = 0,
         historyIsValid: Bool = false,
-        edrHeadroom: Float = 1
+        edrHeadroom: Float = 1,
+        presentationTimestamp: TimeInterval = 0,
+        presentationDelta: Float = 1 / 60,
+        scanPhase: Float = 0,
+        scanSpan: Float = 1,
+        presentationHistoryIsValid: Bool = false,
+        isInterlaced: Bool = false,
+        fieldParity: Float = 0
     ) {
         self.drawableSize = Self.sizeVector(drawableSize)
         self.sourceSize = Self.sizeVector(sourceSize)
@@ -41,9 +51,12 @@ struct ShaderUniforms {
             settings.mask
         )
 
-        // Guest Advanced recommends larger mask pixels as physical output
-        // resolution rises. These values are physical drawable pixels.
-        let maskScale: Float = drawableSize.y >= 1_000 ? 2 : 1
+        // A slot cell needs at least three native pixels across to represent a
+        // bright phosphor center and its surrounding black matrix. Aperture
+        // stripes can remain finer because they are continuous vertically.
+        let maskScale: Float = settings.maskPattern == .slotMask
+            ? 3
+            : (drawableSize.y >= 1_000 ? 2 : 1)
         effect2 = SIMD4(
             settings.glow,
             settings.vignette,
@@ -51,14 +64,28 @@ struct ShaderUniforms {
             Float(settings.maskPattern.rawValue)
         )
 
-        // CRT-Guest-Advanced HD beam defaults with a Phosphor product preset
-        // for visible neutral bloom and warm faceplate halation. The final
-        // shader scales both light terms perceptually with the Tube Glow control.
-        guestBeam = SIMD4(6.0, 8.0, 1.20, 1.0)
-        guestLight = SIMD4(0.34, 0.12, 1.40, 1.10)
-        guestColor = SIMD4(1.80, 1.75, 0.20, 0.50)
-        guestScan = SIMD4(0.60, 0.75, 1.0, 2.40)
-        guestMask = SIMD4(6.0, 1.10, 2.40, 1.0)
+        // Each tube family uses a coherent optical/beam preset rather than a
+        // cosmetic color grade. Individual controls scale these calibrations.
+        switch settings.tubeProfile {
+        case .consumerTV:
+            guestBeam = SIMD4(6.0, 8.0, 1.20, 1.0)
+            guestLight = SIMD4(0.34, 0.12, 1.40, 1.10)
+            guestColor = SIMD4(1.80, 1.75, 0.20, 0.50)
+            guestScan = SIMD4(0.60, 0.75, 1.0, 2.40)
+            guestMask = SIMD4(6.0, 1.10, 2.40, 1.0)
+        case .trinitron:
+            guestBeam = SIMD4(6.4, 8.4, 1.12, 0.94)
+            guestLight = SIMD4(0.30, 0.075, 1.34, 1.08)
+            guestColor = SIMD4(1.82, 1.76, 0.18, 0.48)
+            guestScan = SIMD4(0.64, 0.70, 1.0, 2.35)
+            guestMask = SIMD4(6.0, 1.08, 2.35, 1.0)
+        case .professionalMonitor:
+            guestBeam = SIMD4(7.2, 9.0, 1.02, 0.88)
+            guestLight = SIMD4(0.22, 0.045, 1.25, 1.05)
+            guestColor = SIMD4(1.86, 1.78, 0.14, 0.46)
+            guestScan = SIMD4(0.68, 0.62, 1.0, 2.30)
+            guestMask = SIMD4(6.0, 1.06, 2.30, 1.0)
+        }
         yuvRow0 = yuvConversion.red
         yuvRow1 = yuvConversion.green
         yuvRow2 = yuvConversion.blue
@@ -67,6 +94,27 @@ struct ShaderUniforms {
             historyIsValid ? 1 : 0,
             edrHeadroom.isFinite ? min(max(edrHeadroom, 1), 2) : 1,
             0
+        )
+        let timestamp = presentationTimestamp.isFinite
+            ? Float(presentationTimestamp.truncatingRemainder(dividingBy: 1_024))
+            : 0
+        temporalData = SIMD4(
+            timestamp,
+            presentationDelta.isFinite ? min(max(presentationDelta, 1 / 1_000), 0.1) : 1 / 60,
+            scanPhase.isFinite ? scanPhase - floor(scanPhase) : 0,
+            scanSpan.isFinite ? min(max(scanSpan, 0), 1) : 1
+        )
+        tubeData = SIMD4(
+            settings.persistence,
+            settings.convergence,
+            settings.focus,
+            Float(settings.tubeProfile.rawValue)
+        )
+        videoData = SIMD4(
+            isInterlaced ? 1 : 0,
+            fieldParity >= 0.5 ? 1 : 0,
+            Float(settings.signalType.rawValue),
+            presentationHistoryIsValid ? 1 : 0
         )
     }
 
@@ -112,14 +160,21 @@ final class MetalRenderer: NSObject {
     private var output: AVPlayerItemVideoOutput?
     private var settings = ShaderSettings.default
     private var lastPixelBuffer: CVPixelBuffer?
+    private var cachedFrame: PreparedFrame?
     private var drawableSize = SIMD2<Float>.zero
     private var renderTargets: GuestRenderTargets?
     private var frameCount: UInt64 = 0
     private var edrHeadroom: Float = 1
     private var isPlaybackActive = false
+    private var isPresentationVisible = false
     private var needsRedraw = false
+    private var needsSourceReconstruction = false
     private var requestedPresentationTime: TimeInterval?
     private var awaitingRequestedFrame = false
+    private var scanMetadata = VideoScanMetadata.progressive
+    private var nominalFrameRate: Float = 0
+    private var maximumDisplayFrameRate: Float = 60
+    private var lastPresentationTimestamp: CFTimeInterval?
 
     init(layer: CAMetalLayer) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -190,14 +245,14 @@ final class MetalRenderer: NSObject {
                 index: 0
             )
             let fragment = try library.makeFunction(
-                name: "guestPhosphorMaskFragment",
+                name: "guestPhosphorTemporalFragment",
                 constantValues: constants
             )
             return try Self.makePipeline(
                 device: device,
                 vertex: vertex,
                 fragment: fragment,
-                colorPixelFormat: layer.pixelFormat,
+                colorPixelFormats: [.rgba16Float, layer.pixelFormat],
                 label: label
             )
         }
@@ -272,7 +327,9 @@ final class MetalRenderer: NSObject {
         displayLink.delegate = self
         displayLink.preferredFrameLatency = 1
         displayLink.preferredFrameRateRange = Self.preferredFrameRateRange(
-            nominalFrameRate: 0
+            nominalFrameRate: 0,
+            maximumDisplayFrameRate: 60,
+            simulatesCRT: true
         )
         displayLink.isPaused = true
         displayLink.add(to: .main, forMode: .common)
@@ -286,20 +343,33 @@ final class MetalRenderer: NSObject {
         output: AVPlayerItemVideoOutput?,
         settings: ShaderSettings,
         edrHeadroom: Float,
-        nominalFrameRate: Float
+        nominalFrameRate: Float,
+        scanMetadata: VideoScanMetadata,
+        maximumDisplayFrameRate: Float
     ) {
         if self.output !== output {
             lastPixelBuffer = nil
+            cachedFrame = nil
             renderTargets = nil
             frameCount = 0
             needsRedraw = output != nil
+            needsSourceReconstruction = output != nil
             awaitingRequestedFrame = false
+            lastPresentationTimestamp = nil
         }
         if self.settings != settings {
             needsRedraw = output != nil
-            if self.settings.isBypassed != settings.isBypassed {
+            needsSourceReconstruction = output != nil
+            if self.settings.isBypassed != settings.isBypassed
+                || self.settings.rasterMode != settings.rasterMode {
                 renderTargets = nil
             }
+        }
+        if self.scanMetadata != scanMetadata {
+            self.scanMetadata = scanMetadata
+            needsRedraw = output != nil
+            needsSourceReconstruction = output != nil
+            renderTargets = nil
         }
         let sanitizedHeadroom = edrHeadroom.isFinite
             ? min(max(edrHeadroom, 1), 2)
@@ -310,29 +380,52 @@ final class MetalRenderer: NSObject {
         }
         self.output = output
         self.settings = settings
+        self.nominalFrameRate = nominalFrameRate
+        self.maximumDisplayFrameRate = Self.sanitizedMaximumFrameRate(
+            maximumDisplayFrameRate
+        )
         displayLink.preferredFrameRateRange = Self.preferredFrameRateRange(
-            nominalFrameRate: nominalFrameRate
+            nominalFrameRate: nominalFrameRate,
+            maximumDisplayFrameRate: self.maximumDisplayFrameRate,
+            simulatesCRT: !settings.isBypassed
         )
         updateDisplayLinkState()
     }
 
     static func preferredFrameRateRange(
-        nominalFrameRate: Float
+        nominalFrameRate: Float,
+        maximumDisplayFrameRate: Float = 60,
+        simulatesCRT: Bool = false
     ) -> CAFrameRateRange {
+        let displayMaximum = sanitizedMaximumFrameRate(maximumDisplayFrameRate)
+        if simulatesCRT {
+            return CAFrameRateRange(
+                minimum: min(displayMaximum, 60),
+                maximum: displayMaximum,
+                preferred: displayMaximum
+            )
+        }
         let preferred = nominalFrameRate.isFinite
             && nominalFrameRate >= 1
             && nominalFrameRate <= 240
-            ? nominalFrameRate
-            : 60
+            ? min(nominalFrameRate, displayMaximum)
+            : min(60, displayMaximum)
         return CAFrameRateRange(
             minimum: min(preferred, 24),
-            maximum: max(preferred, 60),
+            maximum: displayMaximum,
             preferred: preferred
         )
     }
 
-    func setActive(_ isActive: Bool) {
+    /// Clamps screen-reported refresh rates into CAMetalDisplayLink's useful range.
+    private static func sanitizedMaximumFrameRate(_ value: Float) -> Float {
+        guard value.isFinite, value >= 24 else { return 60 }
+        return min(value, 240)
+    }
+
+    func setActive(_ isActive: Bool, isVisible: Bool = true) {
         isPlaybackActive = isActive
+        isPresentationVisible = isVisible
         if isActive {
             awaitingRequestedFrame = false
         }
@@ -366,9 +459,10 @@ final class MetalRenderer: NSObject {
     static func shouldRender(
         hasNewPixelBuffer: Bool,
         needsRedraw: Bool,
-        hasLastPixelBuffer: Bool
+        hasLastPixelBuffer: Bool,
+        simulatesCRT: Bool = false
     ) -> Bool {
-        hasLastPixelBuffer && (hasNewPixelBuffer || needsRedraw)
+        hasLastPixelBuffer && (simulatesCRT || hasNewPixelBuffer || needsRedraw)
     }
 
     static func shouldAdvanceHistory(
@@ -380,7 +474,8 @@ final class MetalRenderer: NSObject {
 
     static func guestRasterSize(
         drawableSize: SIMD2<Float>,
-        sourceSize: SIMD2<Float>
+        sourceSize: SIMD2<Float>,
+        rasterMode: CRTRasterMode = .automatic
     ) -> SIMD2<Int> {
         guard drawableSize.x > 0,
               drawableSize.y > 0,
@@ -391,15 +486,57 @@ final class MetalRenderer: NSObject {
 
         let sourceAspect = sourceSize.x / sourceSize.y
         let fittedHeight = min(drawableSize.y, drawableSize.x / sourceAspect)
-        let beamHeight = min(
-            Int(sourceSize.y.rounded(.down)),
-            min(540, max(144, Int((fittedHeight / 2.6).rounded(.down))))
-        )
+        let sourceHeight = Int(sourceSize.y.rounded(.down))
+        let beamHeight: Int
+        switch rasterMode {
+        case .automatic:
+            beamHeight = min(
+                sourceHeight,
+                min(540, max(144, Int((fittedHeight / 2.6).rounded(.down))))
+            )
+        case .progressive240:
+            beamHeight = min(sourceHeight, 240)
+        case .interlaced480:
+            beamHeight = min(sourceHeight, 480)
+        }
         let approximateWidth = max(1, Int((Float(beamHeight) * sourceAspect).rounded()))
         let evenWidth = approximateWidth > 1
             ? approximateWidth - approximateWidth % 2
             : approximateWidth
         return SIMD2(max(evenWidth, 1), max(beamHeight, 1))
+    }
+
+    /// Resolves whether the virtual tube should alternate fields for this asset.
+    static func isInterlaced(
+        rasterMode: CRTRasterMode,
+        scanMetadata: VideoScanMetadata
+    ) -> Bool {
+        switch rasterMode {
+        case .automatic:
+            scanMetadata.fieldOrder.isInterlaced
+        case .progressive240:
+            false
+        case .interlaced480:
+            true
+        }
+    }
+
+    /// Returns the vertical scan frequency for the selected analog system.
+    static func rasterRefreshRate(
+        signalType: CRTSignalType,
+        isInterlaced: Bool,
+        nominalFrameRate: Float
+    ) -> Float {
+        if signalType == .compositePAL {
+            return 50
+        }
+        if isInterlaced,
+           nominalFrameRate.isFinite,
+           nominalFrameRate >= 24,
+           nominalFrameRate <= 30.5 {
+            return nominalFrameRate * 2
+        }
+        return 60
     }
 
     private static func shaderFunction(
@@ -445,6 +582,7 @@ final class MetalRenderer: NSObject {
         return try device.makeRenderPipelineState(descriptor: descriptor)
     }
 
+    /// Encodes one display presentation, refreshing expensive source passes only when needed.
     private func render(_ update: CAMetalDisplayLink.Update) {
         guard inFlightSemaphore.wait(timeout: .now()) == .success else {
             return
@@ -465,13 +603,14 @@ final class MetalRenderer: NSObject {
         guard Self.shouldRender(
             hasNewPixelBuffer: frameUpdate.isNew,
             needsRedraw: needsRedraw,
-            hasLastPixelBuffer: true
+            hasLastPixelBuffer: true,
+            simulatesCRT: !settings.isBypassed
         ) else {
             updateDisplayLinkState()
             return
         }
 
-        guard let frame = makeFrame(from: frameUpdate.pixelBuffer) else {
+        guard let frame = preparedFrame(for: frameUpdate) else {
             return
         }
 
@@ -488,9 +627,41 @@ final class MetalRenderer: NSObject {
         )
         let raster = Self.guestRasterSize(
             drawableSize: currentDrawableSize,
-            sourceSize: frame.sourceSize
+            sourceSize: frame.sourceSize,
+            rasterMode: settings.rasterMode
         )
         let rasterSize = SIMD2(Float(raster.x), Float(raster.y))
+        let timestamp = update.targetPresentationTimestamp
+        let fallbackDelta = 1 / max(maximumDisplayFrameRate, 60)
+        let presentationDelta = lastPresentationTimestamp.map {
+            Float(max(timestamp - $0, 1 / 1_000))
+        } ?? fallbackDelta
+        let interlaced = Self.isInterlaced(
+            rasterMode: settings.rasterMode,
+            scanMetadata: scanMetadata
+        )
+        let rasterRefreshRate = Self.rasterRefreshRate(
+            signalType: settings.signalType,
+            isInterlaced: interlaced,
+            nominalFrameRate: nominalFrameRate
+        )
+        let scanPhase = Float(
+            (timestamp * Double(rasterRefreshRate))
+                .truncatingRemainder(dividingBy: 1)
+        )
+        let scanSpan = min(
+            max(
+                presentationDelta * rasterRefreshRate,
+                1 / max(currentDrawableSize.y, 1)
+            ),
+            1
+        )
+        var fieldParity = Float(
+            Int(floor(timestamp * Double(rasterRefreshRate))) & 1
+        )
+        if scanMetadata.fieldOrder == .bottomFirst {
+            fieldParity = 1 - fieldParity
+        }
 
         if settings.isBypassed {
             var uniforms = ShaderUniforms(
@@ -500,7 +671,13 @@ final class MetalRenderer: NSObject {
                 settings: settings,
                 yuvConversion: frame.yuvConversion,
                 frameCount: frameCount,
-                edrHeadroom: edrHeadroom
+                edrHeadroom: edrHeadroom,
+                presentationTimestamp: timestamp,
+                presentationDelta: presentationDelta,
+                scanPhase: scanPhase,
+                scanSpan: scanSpan,
+                isInterlaced: interlaced,
+                fieldParity: fieldParity
             )
             guard encodePass(
                 commandBuffer: commandBuffer,
@@ -513,7 +690,14 @@ final class MetalRenderer: NSObject {
                 return
             }
         } else {
-            guard let targets = targets(rasterSize: raster) else {
+            let physicalDrawableSize = SIMD2(
+                drawable.texture.width,
+                drawable.texture.height
+            )
+            guard let targets = targets(
+                rasterSize: raster,
+                drawableSize: physicalDrawableSize
+            ) else {
                 return
             }
 
@@ -525,11 +709,21 @@ final class MetalRenderer: NSObject {
                 yuvConversion: frame.yuvConversion,
                 frameCount: frameCount,
                 historyIsValid: targets.historyIsValid,
-                edrHeadroom: edrHeadroom
+                edrHeadroom: edrHeadroom,
+                presentationTimestamp: timestamp,
+                presentationDelta: presentationDelta,
+                scanPhase: scanPhase,
+                scanSpan: scanSpan,
+                presentationHistoryIsValid: targets.presentationIsValid,
+                isInterlaced: interlaced,
+                fieldParity: fieldParity
             )
             let historyRead = targets.history[targets.historyReadIndex]
             let historyWriteIndex = 1 - targets.historyReadIndex
             let historyWrite = targets.history[historyWriteIndex]
+            let reconstructsSource = frameUpdate.isNew
+                || needsSourceReconstruction
+                || !targets.sourceIsValid
             let advancesHistory = Self.shouldAdvanceHistory(
                 hasNewPixelBuffer: frameUpdate.isNew,
                 historyIsValid: targets.historyIsValid
@@ -542,7 +736,7 @@ final class MetalRenderer: NSObject {
             let previousRaw = targets.raw[targets.rawReadIndex]
             let preparesFreshFrame = decodesSource && advancesHistory
 
-            if preparesFreshFrame {
+            if reconstructsSource, preparesFreshFrame {
                 guard encodePass(
                     commandBuffer: commandBuffer,
                     pipeline: frame.preparePipeline,
@@ -557,7 +751,7 @@ final class MetalRenderer: NSObject {
                 ) else {
                     return
                 }
-            } else {
+            } else if reconstructsSource {
                 guard encodePass(
                     commandBuffer: commandBuffer,
                     pipeline: prepassLinearizedPipeline,
@@ -570,59 +764,73 @@ final class MetalRenderer: NSObject {
                 }
             }
 
+            if reconstructsSource {
+                guard encodePass(
+                    commandBuffer: commandBuffer,
+                    pipeline: sharpenPipeline,
+                    target: targets.sharpened,
+                    textures: [targets.prepassLinearized],
+                    uniforms: &uniforms,
+                    label: "2 HD Horizontal Reconstruction"
+                ), encodePass(
+                    commandBuffer: commandBuffer,
+                    pipeline: glowHorizontalPipeline,
+                    target: targets.lightHorizontal,
+                    textures: [targets.prepassLinearized],
+                    uniforms: &uniforms,
+                    label: "3 Glow Horizontal"
+                ), encodePass(
+                    commandBuffer: commandBuffer,
+                    pipeline: glowVerticalPipeline,
+                    target: targets.glow,
+                    textures: [targets.lightHorizontal],
+                    uniforms: &uniforms,
+                    label: "4 Glow Vertical"
+                ), encodePass(
+                    commandBuffer: commandBuffer,
+                    pipeline: bloomHorizontalPipeline,
+                    target: targets.lightHorizontal,
+                    textures: [targets.prepassLinearized],
+                    uniforms: &uniforms,
+                    label: "5 Bloom Horizontal"
+                ), encodePass(
+                    commandBuffer: commandBuffer,
+                    pipeline: bloomVerticalPipeline,
+                    target: targets.bloom,
+                    textures: [targets.lightHorizontal],
+                    uniforms: &uniforms,
+                    label: "6 Bloom Vertical"
+                ) else {
+                    return
+                }
+                targets.sourceIsValid = true
+            }
+
+            let presentationWriteIndex = 1 - targets.presentationReadIndex
             guard encodePass(
-                commandBuffer: commandBuffer,
-                pipeline: sharpenPipeline,
-                target: targets.sharpened,
-                textures: [targets.prepassLinearized],
-                uniforms: &uniforms,
-                label: "2 HD Horizontal Reconstruction"
-            ), encodePass(
-                commandBuffer: commandBuffer,
-                pipeline: glowHorizontalPipeline,
-                target: targets.lightHorizontal,
-                textures: [targets.prepassLinearized],
-                uniforms: &uniforms,
-                label: "3 Glow Horizontal"
-            ), encodePass(
-                commandBuffer: commandBuffer,
-                pipeline: glowVerticalPipeline,
-                target: targets.glow,
-                textures: [targets.lightHorizontal],
-                uniforms: &uniforms,
-                label: "4 Glow Vertical"
-            ), encodePass(
-                commandBuffer: commandBuffer,
-                pipeline: bloomHorizontalPipeline,
-                target: targets.lightHorizontal,
-                textures: [targets.prepassLinearized],
-                uniforms: &uniforms,
-                label: "5 Bloom Horizontal"
-            ), encodePass(
-                commandBuffer: commandBuffer,
-                pipeline: bloomVerticalPipeline,
-                target: targets.bloom,
-                textures: [targets.lightHorizontal],
-                uniforms: &uniforms,
-                label: "6 Bloom Vertical"
-            ), encodePass(
                 commandBuffer: commandBuffer,
                 pipeline: settings.maskPattern == .slotMask
                     ? slotMaskPipeline
                     : apertureMaskPipeline,
-                target: drawable.texture,
+                targets: [
+                    targets.presentation[presentationWriteIndex],
+                    drawable.texture
+                ],
                 textures: [
                     targets.sharpened,
                     targets.bloom,
                     targets.prepassLinearized,
                     targets.glow,
-                    currentRaw
+                    currentRaw,
+                    targets.presentation[targets.presentationReadIndex]
                 ],
                 uniforms: &uniforms,
-                label: "7 Beam, Native-pixel Phosphor Mask, and Glass"
+                label: "7 Display-rate Beam, Phosphor State, Mask, and Glass"
             ) else {
                 return
             }
+            targets.presentationReadIndex = presentationWriteIndex
+            targets.presentationIsValid = true
 
             if advancesHistory {
                 targets.historyReadIndex = historyWriteIndex
@@ -644,6 +852,8 @@ final class MetalRenderer: NSObject {
         }
         commandBuffer.present(drawable)
         needsRedraw = false
+        needsSourceReconstruction = false
+        lastPresentationTimestamp = timestamp
         if frameUpdate.isNew {
             frameCount &+= 1
         }
@@ -708,15 +918,21 @@ final class MetalRenderer: NSObject {
         return true
     }
 
-    private func targets(rasterSize: SIMD2<Int>) -> GuestRenderTargets? {
+    /// Reuses source- and presentation-sized private render targets until geometry changes.
+    private func targets(
+        rasterSize: SIMD2<Int>,
+        drawableSize: SIMD2<Int>
+    ) -> GuestRenderTargets? {
         if let renderTargets,
-           renderTargets.rasterSize == rasterSize {
+           renderTargets.rasterSize == rasterSize,
+           renderTargets.drawableSize == drawableSize {
             return renderTargets
         }
 
         renderTargets = GuestRenderTargets(
             device: device,
-            rasterSize: rasterSize
+            rasterSize: rasterSize,
+            drawableSize: drawableSize
         )
         return renderTargets
     }
@@ -750,8 +966,20 @@ final class MetalRenderer: NSObject {
         return VideoFrameUpdate(pixelBuffer: lastPixelBuffer, isNew: false)
     }
 
+    /// Pauses duplicate presentations only when no virtual CRT is visible.
     private func updateDisplayLinkState() {
-        displayLink.isPaused = !(isPlaybackActive || needsRedraw)
+        let needsContinuousCRT = !settings.isBypassed
+            && isPresentationVisible
+            && output != nil
+        displayLink.isPaused = !(needsContinuousCRT || isPlaybackActive || needsRedraw)
+    }
+
+    /// Keeps the Core Video-to-Metal wrappers for the current decoded frame alive.
+    private func preparedFrame(for update: VideoFrameUpdate) -> PreparedFrame? {
+        if update.isNew || cachedFrame == nil {
+            cachedFrame = makeFrame(from: update.pixelBuffer)
+        }
+        return cachedFrame
     }
 
     private func makeFrame(from pixelBuffer: CVPixelBuffer) -> PreparedFrame? {
@@ -903,8 +1131,10 @@ private struct PreparedFrame {
 
 private final class GuestRenderTargets {
     let rasterSize: SIMD2<Int>
+    let drawableSize: SIMD2<Int>
     let raw: [any MTLTexture]
     let history: [any MTLTexture]
+    let presentation: [any MTLTexture]
     let prepassLinearized: any MTLTexture
     let sharpened: any MTLTexture
     let lightHorizontal: any MTLTexture
@@ -915,10 +1145,14 @@ private final class GuestRenderTargets {
     var rawIsValid = false
     var historyReadIndex = 0
     var historyIsValid = false
+    var sourceIsValid = false
+    var presentationReadIndex = 0
+    var presentationIsValid = false
 
     init?(
         device: any MTLDevice,
-        rasterSize: SIMD2<Int>
+        rasterSize: SIMD2<Int>,
+        drawableSize: SIMD2<Int>
     ) {
         func texture(
             width: Int,
@@ -977,13 +1211,23 @@ private final class GuestRenderTargets {
             width: rasterSize.x,
             height: 600,
             label: "Guest Bloom"
+        ), let presentation0 = texture(
+            width: drawableSize.x,
+            height: drawableSize.y,
+            label: "Phosphor Excitation A"
+        ), let presentation1 = texture(
+            width: drawableSize.x,
+            height: drawableSize.y,
+            label: "Phosphor Excitation B"
         ) else {
             return nil
         }
 
         self.rasterSize = rasterSize
+        self.drawableSize = drawableSize
         raw = [raw0, raw1]
         history = [history0, history1]
+        presentation = [presentation0, presentation1]
         self.prepassLinearized = prepassLinearized
         self.sharpened = sharpened
         self.lightHorizontal = lightHorizontal

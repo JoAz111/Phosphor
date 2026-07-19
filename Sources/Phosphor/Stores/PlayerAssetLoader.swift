@@ -9,6 +9,7 @@ struct PreparedPlayerAsset: Sendable {
     let output: AVPlayerItemVideoOutput
     let duration: TimeInterval
     let nominalFrameRate: Float
+    let scanMetadata: VideoScanMetadata
     let colorMetadata: VideoColorMetadata
     let preparation: MediaPreparation
 
@@ -17,6 +18,7 @@ struct PreparedPlayerAsset: Sendable {
         output: AVPlayerItemVideoOutput,
         duration: TimeInterval,
         nominalFrameRate: Float = 0,
+        scanMetadata: VideoScanMetadata = .progressive,
         colorMetadata: VideoColorMetadata,
         preparation: MediaPreparation
     ) {
@@ -24,6 +26,7 @@ struct PreparedPlayerAsset: Sendable {
         self.output = output
         self.duration = duration
         self.nominalFrameRate = nominalFrameRate
+        self.scanMetadata = scanMetadata
         self.colorMetadata = colorMetadata
         self.preparation = preparation
     }
@@ -34,6 +37,7 @@ struct PreparedPlayerAsset: Sendable {
             output: output,
             duration: duration,
             nominalFrameRate: nominalFrameRate,
+            scanMetadata: scanMetadata,
             colorMetadata: colorMetadata,
             preparation: preparation
         )
@@ -110,6 +114,9 @@ enum AVURLAssetLoader {
             characteristics.formUnion(try await track.load(.mediaCharacteristics))
         }
         let nominalFrameRate = (try? await tracks[0].load(.nominalFrameRate)) ?? 0
+        let formatDescriptions = (
+            try? await tracks[0].load(.formatDescriptions)
+        ) ?? []
 
         let output = videoOutputConfiguration.makeVideoOutput()
         let item = AVPlayerItem(asset: asset)
@@ -120,6 +127,9 @@ enum AVURLAssetLoader {
             output: output,
             duration: loadedDuration.seconds,
             nominalFrameRate: nominalFrameRate,
+            scanMetadata: VideoScanMetadata(
+                formatDescriptions: formatDescriptions
+            ),
             colorMetadata: VideoColorMetadata(
                 mediaCharacteristics: characteristics
             ),

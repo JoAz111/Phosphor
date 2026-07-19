@@ -5,8 +5,9 @@
 <h1 align="center">Phosphor</h1>
 
 <p align="center">
-  <strong>Your videos, rebuilt as light.</strong><br>
-  A native macOS video player with a real-time, Apple Silicon–optimized CRT renderer.
+  <strong>A CRT television, living inside your Mac.</strong><br>
+  Real phosphors, electron-beam behavior, glow, persistence, and curved glass—<br>
+  rebuilt in native Metal and hyper-optimized for Apple silicon.
 </p>
 
 <p align="center">
@@ -24,34 +25,64 @@
 
 ---
 
-Phosphor is not a video player with a scanline texture on top. It reconstructs
-each frame as a virtual CRT would: a finite electron-beam raster, brightness-
+Drop in a video and Phosphor turns your Mac into a beautifully imperfect CRT.
+It does not place a scanline texture over the picture. It reconstructs every
+frame as a virtual tube would: a finite electron-beam raster, brightness-
 dependent beam shapes, discrete RGB phosphors, temporal persistence, diffuse
 light, and curved glass.
 
 It is native from end to end—SwiftUI and AppKit for the interface, AVFoundation
-for playback, and an eleven-stage Metal renderer for the tube.
+for playback, and a multi-pass Metal renderer for the tube. The result looks
+computationally extravagant, but runs like butter without making Apple silicon
+break a sweat.
 
 > [!IMPORTANT]
-> Phosphor is an early FOSS preview. The core progressive CRT path is working,
+> Phosphor is an early FOSS preview. The physical CRT path is working,
 > but exact pixel parity with the complete upstream Guest Advanced preset is not
 > claimed yet. See [Fidelity and roadmap](#fidelity-and-roadmap) for the honest
 > boundary.
 
 ## A CRT, not a filter
 
-- **Individual RGB phosphors.** Choose CRT Guest Advanced's type 6 aperture
-  grille or its staggered slot-mask geometry. On Retina displays, both patterns
-  scale in physical pixels—not SwiftUI points.
+- **Individual RGB phosphors.** Choose a continuous aperture grille or a true
+  two-dimensional slot-mask lattice. Slot mode draws separate rounded R/G/B
+  deposits, a black matrix in both axes, and vertically staggered neighboring
+  triads. On Retina displays, both patterns use physical pixels—not SwiftUI
+  points.
 - **Beams that react to the picture.** Dark detail produces narrow scanlines;
   bright areas excite wider, softer beams instead of receiving identical black
   stripes.
-- **Light with a memory.** Previous frames feed a phosphor-persistence pass while
-  separable glow and bloom stages model light spreading through the tube.
-- **Native performance.** Video frames enter Metal through `CVMetalTextureCache`
-  and stay in private `RGBA16Float` textures. The graph advances with source
-  frames, so 24/30 fps video does not run the full renderer at 60 fps or decay
-  persistence too quickly.
+- **A raster with time.** 240p is progressive; 480i alternates fields. At high
+  display refresh rates the virtual beam advances through part of the raster on
+  every presentation instead of stamping the whole image at once.
+- **Light with a memory.** A native-resolution excitation buffer gives red,
+  green, and blue phosphors separate decay curves while glow, bloom, and warm
+  faceplate scatter spread light through the tube.
+- **Analog inputs.** Select clean RGB, bandwidth-limited S-Video, NTSC composite,
+  or PAL composite with chroma delay, dot crawl, and cross-color behavior.
+- **Built to run like butter.** Video frames enter Metal without a CPU-side
+  image copy and remain on the GPU through the entire CRT graph. Phosphor only
+  performs the expensive work when the video actually produces a new frame.
+
+## Looks heavy. Runs light.
+
+Phosphor is hyper-optimized around the architecture of Apple silicon. Video
+frames become Metal textures through `CVMetalTextureCache`; the complete CRT
+graph is encoded into one command buffer; intermediate images remain in private
+`RGBA16Float` GPU textures; and the final `CAMetalLayer` is framebuffer-only.
+There is no CPU readback in the playback path.
+
+Rendering uses two deliberately different clocks. A 24 fps movie gets 24 costly
+source-reconstruction updates per second. A much lighter final pass follows the
+Mac display—up to 120 Hz or beyond—to advance the beam and phosphor state. That
+is what preserves temporal CRT behavior without rerunning the full graph for
+duplicate video frames. Pipeline states are created up front, mask variants are
+specialized with Metal function constants, occluded windows stop presenting,
+and in-flight work is deliberately bounded to keep playback responsive.
+
+That is how Phosphor can simulate a beam, persistence, bloom, glow, individual
+RGB phosphors, and curved glass in real time while still feeling like a tiny,
+effortless native Mac app—not a GPU benchmark wearing video-player controls.
 
 ## Play almost anything
 
@@ -100,8 +131,9 @@ Useful development modes:
 - Play or pause with **Space**.
 - Seek and change volume from the floating player controls.
 - Use **Bypass CRT Effect** for an immediate source comparison.
-- Tune curvature, beam scanlines, phosphor strength, tube glow, and vignette in
-  **Advanced CRT Settings**.
+- Choose a Consumer TV, Trinitron, or PVM tube calibration in **Advanced CRT
+  Settings**, then tune raster mode, analog signal, persistence, convergence,
+  focus, curvature, scanlines, mask, glow, and vignette.
 - Enter full screen with the standard macOS window control.
 
 ## How it works
@@ -109,38 +141,45 @@ Useful development modes:
 ```text
 AVFoundation video
   → zero-copy CVMetalTextureCache input
+  → RGB / S-Video / NTSC / PAL signal reconstruction
   → encoded current/previous frame buffers
-  → phosphor persistence and color prepass
+  → source history and color prepass
   → Guest 1.8-gamma linearization
   → horizontal reconstruction
   → glow and bloom diffusion
-  → luminance-dependent beam reconstruction
-  → physical-pixel RGB aperture grille and glass
+  → display-rate beam and optional alternating fields
+  → native-resolution RGB phosphor excitation and decay
+  → physical-pixel aperture grille or 2D slot lattice and glass
   → CAMetalLayer
 ```
 
 The Metal graph is based on
 [CRT-Guest-Advanced HD](https://github.com/libretro/slang-shaders/tree/master/crt/shaders/guest/hd)
-and adapted for progressive AVFoundation video, a variable window size, Retina
-backing pixels, and Apple Silicon GPUs. A true one-pass bypass remains separate
-from the CRT graph.
+and adapted for AVFoundation video, interlaced field metadata, a variable window
+size, Retina backing pixels, and Apple Silicon GPUs. A true one-pass bypass
+remains separate from the CRT graph.
 
 ## Fidelity and roadmap
 
-The current renderer ports Guest Advanced HD's default progressive signal path:
-persistence, color prepass, 1.8-gamma linearization, reconstruction filters,
+The current renderer ports Guest Advanced HD's core signal path: source history,
+color prepass, 1.8-gamma linearization, reconstruction filters, luminance-driven
 beam response, glow/bloom stages, brightness compensation, and the final mask.
+Phosphor adds a display-rate electron-beam model, automatic field metadata plus
+explicit 240p/480i modes, native-resolution channel-specific phosphor decay,
+analog signal choices, tube profiles, edge focus, and convergence error.
 
-Phosphor includes Guest's type 6 RGB aperture grille and a staggered slot-mask
-variant. Both share the same beam, brightness-adaptive phosphor response, and
-physical-pixel scaling instead of behaving like unrelated texture presets.
+Phosphor includes Guest's type 6 RGB aperture grille and a separately modeled
+shadow-mask lattice. The slot mask is not grille output with horizontal bars:
+each RGB deposit has its own rounded aperture and surrounding black matrix, and
+alternating triads are offset vertically. Bright emitters grow into the matrix
+the way an energized beam spot grows on a tube.
 
 Still to come:
 
 - Pixel-parity fixtures captured from a pinned RetroArch reference renderer
 - Optional color LUTs and the remaining Guest shadow-mask patterns
-- Interlacing and VGA-specific branches
-- Deconvergence and noise controls
+- Additional shadow-mask geometries and VGA-specific branches
+- Calibrated RF input, vertical sync instability, and service-menu controls
 - A redistributable bundled FFmpeg build for signed releases
 - HDR-native output rather than the current clearly identified SDR path
 
@@ -154,9 +193,10 @@ DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
 ```
 
 The suite includes live-GPU checks for every Metal entry point, Guest's input
-gamma, initial persistence, luminance-dependent raster lines, discrete RGB
-phosphors, and true bypass. It also exercises a real FFmpeg-to-AVFoundation
-Matroska compatibility path.
+gamma, channel-specific phosphor decay, alternating interlaced fields,
+luminance-dependent raster lines, discrete RGB phosphors, the two-dimensional
+slot lattice and black matrix, and true bypass. It also exercises a real
+FFmpeg-to-AVFoundation Matroska compatibility path.
 
 <details>
 <summary>Project structure</summary>

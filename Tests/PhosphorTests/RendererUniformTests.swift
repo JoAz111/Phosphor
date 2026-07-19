@@ -43,6 +43,12 @@ final class RendererUniformTests: XCTestCase {
             needsRedraw: true,
             hasLastPixelBuffer: false
         ))
+        XCTAssertTrue(MetalRenderer.shouldRender(
+            hasNewPixelBuffer: false,
+            needsRedraw: false,
+            hasLastPixelBuffer: true,
+            simulatesCRT: true
+        ))
     }
 
     func testDisplayCadenceTracksVideoAndFallsBackToSixtyHertz() throws {
@@ -63,6 +69,15 @@ final class RendererUniformTests: XCTestCase {
         XCTAssertEqual(fallback.minimum, 24)
         XCTAssertEqual(fallback.maximum, 60)
         XCTAssertEqual(try XCTUnwrap(fallback.preferred), 60)
+
+        let crt = MetalRenderer.preferredFrameRateRange(
+            nominalFrameRate: 23.976,
+            maximumDisplayFrameRate: 120,
+            simulatesCRT: true
+        )
+        XCTAssertEqual(crt.minimum, 60)
+        XCTAssertEqual(crt.maximum, 120)
+        XCTAssertEqual(try XCTUnwrap(crt.preferred), 120)
     }
 
     func testTemporalHistoryAdvancesOnlyForVideoFramesOrInitialization() {
@@ -115,9 +130,62 @@ final class RendererUniformTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(720 / raster.y, 2)
     }
 
+    func testExplicitRasterModesProducePeriodCorrectLineCounts() {
+        XCTAssertEqual(
+            MetalRenderer.guestRasterSize(
+                drawableSize: SIMD2(3_840, 2_160),
+                sourceSize: SIMD2(1_920, 1_080),
+                rasterMode: .progressive240
+            ).y,
+            240
+        )
+        XCTAssertEqual(
+            MetalRenderer.guestRasterSize(
+                drawableSize: SIMD2(3_840, 2_160),
+                sourceSize: SIMD2(1_920, 1_080),
+                rasterMode: .interlaced480
+            ).y,
+            480
+        )
+    }
+
+    func testInterlaceModeHonorsSourceMetadataAndOverrides() {
+        let interlaced = VideoScanMetadata(fieldOrder: .topFirst)
+        XCTAssertTrue(MetalRenderer.isInterlaced(
+            rasterMode: .automatic,
+            scanMetadata: interlaced
+        ))
+        XCTAssertFalse(MetalRenderer.isInterlaced(
+            rasterMode: .progressive240,
+            scanMetadata: interlaced
+        ))
+        XCTAssertTrue(MetalRenderer.isInterlaced(
+            rasterMode: .interlaced480,
+            scanMetadata: .progressive
+        ))
+    }
+
+    func testRasterRefreshRateTracksPALAndInterlacedMetadata() {
+        XCTAssertEqual(MetalRenderer.rasterRefreshRate(
+            signalType: .compositePAL,
+            isInterlaced: false,
+            nominalFrameRate: 60
+        ), 50)
+        XCTAssertEqual(MetalRenderer.rasterRefreshRate(
+            signalType: .rgb,
+            isInterlaced: true,
+            nominalFrameRate: 29.97
+        ), 59.94, accuracy: 0.001)
+        XCTAssertEqual(MetalRenderer.rasterRefreshRate(
+            signalType: .rgb,
+            isInterlaced: false,
+            nominalFrameRate: 24
+        ), 60)
+    }
+
     func testShaderUniformLayoutMatchesMetalLayout() {
-        XCTAssertEqual(MemoryLayout<ShaderUniforms>.size, 224)
-        XCTAssertEqual(MemoryLayout<ShaderUniforms>.stride, 224)
+        XCTAssertEqual(MemoryLayout<ShaderUniforms>.size, 272)
+        XCTAssertEqual(MemoryLayout<ShaderUniforms>.stride, 272)
         XCTAssertEqual(MemoryLayout<ShaderUniforms>.alignment, 16)
     }
 
@@ -129,7 +197,13 @@ final class RendererUniformTests: XCTestCase {
             mask: 0.14,
             maskPattern: .slotMask,
             glow: 0.15,
-            vignette: 0.16
+            vignette: 0.16,
+            persistence: 0.17,
+            convergence: 0.18,
+            focus: 0.19,
+            rasterMode: .interlaced480,
+            signalType: .compositeNTSC,
+            tubeProfile: .professionalMonitor
         )
 
         let uniforms = ShaderUniforms(
@@ -144,13 +218,15 @@ final class RendererUniformTests: XCTestCase {
         XCTAssertEqual(uniforms.sourceSize, SIMD4(1_920, 1_080, 1 / 1_920, 1 / 1_080))
         XCTAssertEqual(uniforms.rasterSize, SIMD4(960, 540, 1 / 960, 1 / 540))
         XCTAssertEqual(uniforms.effect, SIMD4(0.11, 0.12, 0.13, 0.14))
-        XCTAssertEqual(uniforms.effect2, SIMD4(0.15, 0.16, 2, 1))
-        XCTAssertEqual(uniforms.guestBeam, SIMD4(6.0, 8.0, 1.20, 1.0))
-        XCTAssertEqual(uniforms.guestLight, SIMD4(0.34, 0.12, 1.40, 1.10))
-        XCTAssertEqual(uniforms.guestColor, SIMD4(1.80, 1.75, 0.20, 0.50))
-        XCTAssertEqual(uniforms.guestScan, SIMD4(0.60, 0.75, 1.0, 2.40))
-        XCTAssertEqual(uniforms.guestMask, SIMD4(6.0, 1.10, 2.40, 1.0))
+        XCTAssertEqual(uniforms.effect2, SIMD4(0.15, 0.16, 3, 1))
+        XCTAssertEqual(uniforms.guestBeam, SIMD4(7.2, 9.0, 1.02, 0.88))
+        XCTAssertEqual(uniforms.guestLight, SIMD4(0.22, 0.045, 1.25, 1.05))
+        XCTAssertEqual(uniforms.guestColor, SIMD4(1.86, 1.78, 0.14, 0.46))
+        XCTAssertEqual(uniforms.guestScan, SIMD4(0.68, 0.62, 1.0, 2.30))
+        XCTAssertEqual(uniforms.guestMask, SIMD4(6.0, 1.06, 2.30, 1.0))
         XCTAssertEqual(uniforms.frameData.z, 1)
+        XCTAssertEqual(uniforms.tubeData, SIMD4(0.17, 0.18, 0.19, 2))
+        XCTAssertEqual(uniforms.videoData.z, 2)
     }
 
     func testEDRHeadroomIsClampedWithoutChangingUniformLayout() {

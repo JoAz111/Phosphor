@@ -17,7 +17,13 @@ final class ControlBindingTests: XCTestCase {
             mask: 2,
             maskPattern: .slotMask,
             glow: -1,
-            vignette: 2
+            vignette: 2,
+            persistence: -1,
+            convergence: 2,
+            focus: -1,
+            rasterMode: .interlaced480,
+            signalType: .compositePAL,
+            tubeProfile: .professionalMonitor
         )
 
         XCTAssertEqual(
@@ -29,7 +35,13 @@ final class ControlBindingTests: XCTestCase {
                 mask: 2,
                 maskPattern: .slotMask,
                 glow: -1,
-                vignette: 2
+                vignette: 2,
+                persistence: -1,
+                convergence: 2,
+                focus: -1,
+                rasterMode: .interlaced480,
+                signalType: .compositePAL,
+                tubeProfile: .professionalMonitor
             )
         )
         XCTAssertTrue(preferences.edrPhosphors)
@@ -59,6 +71,12 @@ final class ControlBindingTests: XCTestCase {
             maskPattern: .slotMask,
             glow: 0.5,
             vignette: 0.6,
+            persistence: 0.7,
+            convergence: 0.8,
+            focus: 0.9,
+            rasterMode: .interlaced480,
+            signalType: .compositeNTSC,
+            tubeProfile: .professionalMonitor,
             edrPhosphors: false
         )
 

@@ -12,6 +12,12 @@ final class ShaderSettingsTests: XCTestCase {
         XCTAssertEqual(settings.maskPattern, .apertureGrille)
         XCTAssertEqual(settings.glow, 0.18)
         XCTAssertEqual(settings.vignette, 0.28)
+        XCTAssertEqual(settings.persistence, 0.34)
+        XCTAssertEqual(settings.convergence, 0.10)
+        XCTAssertEqual(settings.focus, 0.12)
+        XCTAssertEqual(settings.rasterMode, .automatic)
+        XCTAssertEqual(settings.signalType, .rgb)
+        XCTAssertEqual(settings.tubeProfile, .consumerTV)
     }
 
     func testInitializerClampsAtBothBounds() {
@@ -21,7 +27,10 @@ final class ShaderSettingsTests: XCTestCase {
             scanlines: -1,
             mask: 2,
             glow: -1,
-            vignette: 2
+            vignette: 2,
+            persistence: -1,
+            convergence: 2,
+            focus: -1
         )
 
         XCTAssertEqual(settings.intensity, 0)
@@ -30,6 +39,9 @@ final class ShaderSettingsTests: XCTestCase {
         XCTAssertEqual(settings.mask, 1)
         XCTAssertEqual(settings.glow, 0)
         XCTAssertEqual(settings.vignette, 1)
+        XCTAssertEqual(settings.persistence, 0)
+        XCTAssertEqual(settings.convergence, 1)
+        XCTAssertEqual(settings.focus, 0)
     }
 
     func testInitializerSanitizesNonfiniteValues() {
@@ -39,7 +51,10 @@ final class ShaderSettingsTests: XCTestCase {
             scanlines: -.infinity,
             mask: .nan,
             glow: .infinity,
-            vignette: -.infinity
+            vignette: -.infinity,
+            persistence: .nan,
+            convergence: .infinity,
+            focus: -.infinity
         )
 
         XCTAssertEqual(settings.intensity, 0.88)
@@ -48,6 +63,9 @@ final class ShaderSettingsTests: XCTestCase {
         XCTAssertEqual(settings.mask, 0.42)
         XCTAssertEqual(settings.glow, 1)
         XCTAssertEqual(settings.vignette, 0)
+        XCTAssertEqual(settings.persistence, 0.34)
+        XCTAssertEqual(settings.convergence, 1)
+        XCTAssertEqual(settings.focus, 0)
     }
 
     func testZeroIntensityBypassesShader() {

@@ -16,6 +16,7 @@ final class PlayerStore {
     private(set) var currentTime: TimeInterval = 0
     private(set) var duration: TimeInterval = 0
     private(set) var nominalFrameRate: Float = 0
+    private(set) var scanMetadata: VideoScanMetadata = .progressive
     private(set) var volume: Float = 1
     private(set) var currentURL: URL?
     private(set) var errorMessage: String?
@@ -117,6 +118,7 @@ final class PlayerStore {
             currentTime = 0
             duration = Self.finiteNonnegative(prepared.duration)
             nominalFrameRate = Self.finiteNonnegative(prepared.nominalFrameRate)
+            scanMetadata = prepared.scanMetadata
             errorMessage = nil
             noticeMessage = prepared.colorMetadata.sdrPathNotice
             if let preparationNotice = prepared.preparation.notice {

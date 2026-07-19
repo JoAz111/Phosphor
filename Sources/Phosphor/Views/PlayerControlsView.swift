@@ -14,6 +14,12 @@ struct ControlPreferences: Equatable {
     var maskPattern: PhosphorMaskPattern
     var glow: Double
     var vignette: Double
+    var persistence: Double
+    var convergence: Double
+    var focus: Double
+    var rasterMode: CRTRasterMode
+    var signalType: CRTSignalType
+    var tubeProfile: CRTTubeProfile
     var edrPhosphors: Bool
 
     static let `default` = ControlPreferences()
@@ -26,7 +32,13 @@ struct ControlPreferences: Equatable {
             mask: Float(mask),
             maskPattern: maskPattern,
             glow: Float(glow),
-            vignette: Float(vignette)
+            vignette: Float(vignette),
+            persistence: Float(persistence),
+            convergence: Float(convergence),
+            focus: Float(focus),
+            rasterMode: rasterMode,
+            signalType: signalType,
+            tubeProfile: tubeProfile
         )
     }
 
@@ -39,6 +51,12 @@ struct ControlPreferences: Equatable {
         maskPattern: PhosphorMaskPattern = ShaderSettings.default.maskPattern,
         glow: Double = Double(ShaderSettings.default.glow),
         vignette: Double = Double(ShaderSettings.default.vignette),
+        persistence: Double = Double(ShaderSettings.default.persistence),
+        convergence: Double = Double(ShaderSettings.default.convergence),
+        focus: Double = Double(ShaderSettings.default.focus),
+        rasterMode: CRTRasterMode = ShaderSettings.default.rasterMode,
+        signalType: CRTSignalType = ShaderSettings.default.signalType,
+        tubeProfile: CRTTubeProfile = ShaderSettings.default.tubeProfile,
         edrPhosphors: Bool = true
     ) {
         self.isBypassed = isBypassed
@@ -49,6 +67,12 @@ struct ControlPreferences: Equatable {
         self.maskPattern = maskPattern
         self.glow = glow
         self.vignette = vignette
+        self.persistence = persistence
+        self.convergence = convergence
+        self.focus = focus
+        self.rasterMode = rasterMode
+        self.signalType = signalType
+        self.tubeProfile = tubeProfile
         self.edrPhosphors = edrPhosphors
     }
 

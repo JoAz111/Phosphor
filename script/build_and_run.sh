@@ -168,6 +168,8 @@ PLIST
 # Sign before copying into a File Provider-backed workspace. File Provider can
 # attach Finder metadata after the copy even though the sealed files are intact.
 /usr/bin/ditto --norsrc --noextattr "$STAGED_APP_BUNDLE" "$APP_BUNDLE"
+/usr/bin/xattr -cr "$APP_BUNDLE"
+/usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"

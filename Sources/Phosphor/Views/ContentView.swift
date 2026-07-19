@@ -19,6 +19,18 @@ struct ContentView: View {
     private var glow = ControlPreferences.default.glow
     @AppStorage("phosphor.shader.vignette")
     private var vignette = ControlPreferences.default.vignette
+    @AppStorage("phosphor.shader.persistence")
+    private var persistence = ControlPreferences.default.persistence
+    @AppStorage("phosphor.shader.convergence")
+    private var convergence = ControlPreferences.default.convergence
+    @AppStorage("phosphor.shader.focus")
+    private var focus = ControlPreferences.default.focus
+    @AppStorage("phosphor.shader.rasterMode")
+    private var rasterModeRawValue = ControlPreferences.default.rasterMode.rawValue
+    @AppStorage("phosphor.shader.signalType")
+    private var signalTypeRawValue = ControlPreferences.default.signalType.rawValue
+    @AppStorage("phosphor.shader.tubeProfile")
+    private var tubeProfileRawValue = ControlPreferences.default.tubeProfile.rawValue
     @AppStorage("phosphor.display.edrPhosphors")
     private var edrPhosphors = ControlPreferences.default.edrPhosphors
 
@@ -37,6 +49,7 @@ struct ContentView: View {
                 active: store.transport == .playing,
                 presentationTime: store.currentTime,
                 nominalFrameRate: store.nominalFrameRate,
+                scanMetadata: store.scanMetadata,
                 edrPhosphors: controlPreferences.edrPhosphors
             )
 
@@ -156,6 +169,14 @@ struct ContentView: View {
                 ?? .apertureGrille,
             glow: glow,
             vignette: vignette,
+            persistence: persistence,
+            convergence: convergence,
+            focus: focus,
+            rasterMode: CRTRasterMode(rawValue: rasterModeRawValue)
+                ?? .automatic,
+            signalType: CRTSignalType(rawValue: signalTypeRawValue) ?? .rgb,
+            tubeProfile: CRTTubeProfile(rawValue: tubeProfileRawValue)
+                ?? .consumerTV,
             edrPhosphors: edrPhosphors
         )
     }
@@ -172,6 +193,12 @@ struct ContentView: View {
                 maskPatternRawValue = preferences.maskPattern.rawValue
                 glow = preferences.glow
                 vignette = preferences.vignette
+                persistence = preferences.persistence
+                convergence = preferences.convergence
+                focus = preferences.focus
+                rasterModeRawValue = preferences.rasterMode.rawValue
+                signalTypeRawValue = preferences.signalType.rawValue
+                tubeProfileRawValue = preferences.tubeProfile.rawValue
                 edrPhosphors = preferences.edrPhosphors
             }
         )

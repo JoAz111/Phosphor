@@ -7,6 +7,7 @@ struct MetalVideoRepresentable: NSViewRepresentable {
     let active: Bool
     let presentationTime: TimeInterval
     let nominalFrameRate: Float
+    let scanMetadata: VideoScanMetadata
     let edrPhosphors: Bool
 
     func makeNSView(context: Context) -> MetalVideoView {
@@ -16,6 +17,7 @@ struct MetalVideoRepresentable: NSViewRepresentable {
             settings: settings,
             presentationTime: presentationTime,
             nominalFrameRate: nominalFrameRate,
+            scanMetadata: scanMetadata,
             edrPhosphors: edrPhosphors
         )
         view.setActive(active)
@@ -28,6 +30,7 @@ struct MetalVideoRepresentable: NSViewRepresentable {
             settings: settings,
             presentationTime: presentationTime,
             nominalFrameRate: nominalFrameRate,
+            scanMetadata: scanMetadata,
             edrPhosphors: edrPhosphors
         )
         nsView.setActive(active)
@@ -37,6 +40,6 @@ struct MetalVideoRepresentable: NSViewRepresentable {
         _ nsView: MetalVideoView,
         coordinator: Void
     ) {
-        nsView.setActive(false)
+        nsView.stopPresentation()
     }
 }
