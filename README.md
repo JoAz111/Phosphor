@@ -24,6 +24,10 @@
   <a href="#fidelity-and-roadmap">Fidelity</a>
 </p>
 
+<p align="center">
+  <img src="assets/phosphor-player.webp" width="100%" alt="Phosphor playing a video through its CRT simulation">
+</p>
+
 ---
 
 Drop in a video and Phosphor turns your Mac into a beautifully imperfect CRT.
