@@ -1613,16 +1613,29 @@ GuestTemporalSolution guestIntegratePhosphor(
     constant ShaderUniforms &uniforms
 ) {
     GuestTemporalSolution result;
-    if (!hasHistory) {
-        result.state = instantaneous;
-        result.integrated = instantaneous;
-        return result;
-    }
-
     float dt = max(uniforms.temporalData.y, 1.0 / 1000.0);
     float refresh = max(uniforms.scanTiming.x, 24.0);
     float scanPeriod = 1.0 / refresh;
     float3 lifetime = max(uniforms.temporalResponse.xyz, float3(0.0005));
+    float pixelPhase = guestPixelBeamPhase(uv, uniforms);
+    float distanceBehindBeam = fract(
+        uniforms.temporalData.z - pixelPhase + 1.0
+    );
+    float beamAge = distanceBehindBeam * scanPeriod;
+    float3 impulse = instantaneous * (scanPeriod / lifetime);
+    float3 periodDecay = exp(-scanPeriod / lifetime);
+
+    // Seed the physical state at its steady-state beam phase. Starting with the
+    // instantaneous color would take several presentations to converge and can
+    // flash once when playback begins or temporal history is rebuilt.
+    if (!hasHistory) {
+        result.state = impulse
+            * exp(-beamAge / lifetime)
+            / max(1.0 - periodDecay, float3(0.0001));
+        result.integrated = instantaneous;
+        return result;
+    }
+
     float3 retainedPrevious = previous * (1.0 - discontinuity);
     float3 decay = exp(-dt / lifetime);
     float3 state = retainedPrevious * decay;
@@ -1631,10 +1644,6 @@ GuestTemporalSolution guestIntegratePhosphor(
         * (1.0 - decay)
         / dt;
 
-    float pixelPhase = guestPixelBeamPhase(uv, uniforms);
-    float distanceBehindBeam = fract(
-        uniforms.temporalData.z - pixelPhase + 1.0
-    );
     float scanSpan = saturate(uniforms.temporalData.w);
     float phaseSoftness = max(
         1.0 / (uniforms.scanTiming.z * 128.0),
@@ -1645,11 +1654,10 @@ GuestTemporalSolution guestIntegratePhosphor(
         scanSpan + phaseSoftness,
         distanceBehindBeam
     );
-    float age = min(distanceBehindBeam * scanPeriod, dt);
+    float age = min(beamAge, dt);
 
     // One beam visit deposits an impulse whose energy integrates to the desired
     // steady luminance over a complete raster period.
-    float3 impulse = instantaneous * (scanPeriod / lifetime);
     float3 ageDecay = exp(-age / lifetime);
     state += impulse * ageDecay * swept;
     integrated += impulse
@@ -1658,22 +1666,37 @@ GuestTemporalSolution guestIntegratePhosphor(
         * swept
         / dt;
 
+    // A sample-and-hold panel must not directly display the small fraction of a
+    // raster swept during one display refresh: doing so turns the CRT's brief
+    // light pulse into a conspicuous rolling flicker. Stable mode analytically
+    // integrates the current state and the next beam impulse across one complete
+    // raster period. For a steady pixel this is phase-invariant, while real
+    // phosphor history can still contribute a restrained, neutral presentation.
+    // Low Persistence deliberately retains the physical partial-frame exposure
+    // and is enabled only on 100-Hz-or-faster screens.
+    if (uniforms.temporalResponse.w < 0.5) {
+        float3 stateEnergy = state
+            * lifetime
+            * (1.0 - periodDecay);
+        float3 nextImpulseEnergy = impulse
+            * lifetime
+            * (1.0 - exp(-beamAge / lifetime));
+        float3 fullRasterAverage = (
+            stateEnergy + nextImpulseEnergy
+        ) / scanPeriod;
+        float stableHistoryWeight = 0.05
+            + 0.07 * saturate(uniforms.tubeData.x);
+        integrated = mix(
+            instantaneous,
+            fullRasterAverage,
+            stableHistoryWeight
+        );
+    }
+
     // Large local changes are source discontinuities, not phosphor energy. The
     // current beam solution replaces the stale state immediately so fast motion
     // and hard cuts never leave a colored double image.
     integrated = mix(integrated, instantaneous, discontinuity * 0.94);
-
-    // Stable mode compensates only for the part of a raster not covered by a
-    // high-refresh panel presentation. Low-persistence mode leaves the physical
-    // rolling exposure untouched and is enabled only on 100-Hz-or-faster screens.
-    if (uniforms.temporalResponse.w < 0.5) {
-        float sampleHoldCompensation = (1.0 - scanSpan) * 0.42;
-        integrated = mix(
-            integrated,
-            instantaneous,
-            sampleHoldCompensation
-        );
-    }
 
     result.state = max(state, 0.0);
     result.integrated = max(integrated, 0.0);

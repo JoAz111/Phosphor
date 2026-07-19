@@ -536,6 +536,56 @@ final class MetalShaderTests: XCTestCase {
         XCTAssertLessThanOrEqual(abs(Int(reference.z) - Int(presented.z)), 3)
     }
 
+    func testStableTemporalModeDoesNotExposePartialRasterFlicker() throws {
+        let size = 8
+        let current = try makeSolidFloatTexture(
+            width: size,
+            height: size,
+            color: SIMD4<Float>(0.30, 0.30, 0.30, 0.30)
+        )
+        let black = try makeSolidFloatTexture(
+            width: size,
+            height: size,
+            color: SIMD4<Float>(0, 0, 0, 1)
+        )
+        let settings = ShaderSettings(
+            intensity: 1,
+            curvature: 0,
+            scanlines: 0,
+            mask: 0,
+            glow: 0,
+            vignette: 0,
+            persistence: 0.5,
+            temporalMode: .stable
+        )
+
+        let beforeBeam = try renderTemporal(
+            outputSize: SIMD2(size, size),
+            textures: [current, black, black, black, black, black],
+            settings: settings,
+            presentationDelta: 1 / 120,
+            scanPhase: 0.25,
+            scanSpan: 0.5,
+            readsDisplay: true
+        )
+        let afterBeam = try renderTemporal(
+            outputSize: SIMD2(size, size),
+            textures: [current, black, black, black, black, black],
+            settings: settings,
+            presentationDelta: 1 / 120,
+            scanPhase: 0.75,
+            scanSpan: 0.5,
+            readsDisplay: true
+        )
+
+        let before = bgraPixel(beforeBeam, width: size, x: 4, y: 4)
+        let after = bgraPixel(afterBeam, width: size, x: 4, y: 4)
+        XCTAssertGreaterThan(before.x, 20)
+        XCTAssertLessThanOrEqual(abs(Int(before.x) - Int(after.x)), 3)
+        XCTAssertLessThanOrEqual(abs(Int(before.y) - Int(after.y)), 3)
+        XCTAssertLessThanOrEqual(abs(Int(before.z) - Int(after.z)), 3)
+    }
+
     func testCompositeSignalHasFiniteLumaBandwidth() throws {
         let width = 256
         let source = try makeStepTexture(width: width, height: 4)
