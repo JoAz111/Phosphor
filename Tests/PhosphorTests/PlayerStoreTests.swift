@@ -16,6 +16,7 @@ final class PlayerStoreTests: XCTestCase {
         XCTAssertEqual(store.scanMetadata, .progressive)
         XCTAssertEqual(store.volume, 1)
         XCTAssertNil(store.videoOutput)
+        XCTAssertNil(store.frameSource)
         XCTAssertNil(store.currentURL)
         XCTAssertNil(store.errorMessage)
         XCTAssertNil(store.noticeMessage)
@@ -180,11 +181,11 @@ final class PlayerStoreTests: XCTestCase {
         )
     }
 
-    func testFFmpegPreparationNoticeIsPresentedWithHDRNotice() async {
+    func testFFmpegDirectNoticeIsPresentedWithHDRNotice() async {
         let prepared = makePreparedPlayerAsset(
             duration: 12,
             metadata: VideoColorMetadata(mediaCharacteristics: [.containsHDRVideo]),
-            preparation: .ffmpegTranscode
+            preparation: .ffmpegDirect
         )
         let store = PlayerStore(assetLoader: { _ in prepared })
 
@@ -192,7 +193,7 @@ final class PlayerStoreTests: XCTestCase {
 
         XCTAssertEqual(
             store.noticeMessage,
-            "\(VideoColorMetadata.hdrSDRPathNotice) Prepared a compatible playback copy with FFmpeg."
+            "\(VideoColorMetadata.hdrSDRPathNotice) Decoding directly with bundled FFmpeg."
         )
         XCTAssertFalse(store.isLoading)
     }

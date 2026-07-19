@@ -480,6 +480,10 @@ final class MetalShaderTests: XCTestCase {
             (
                 "guestPhosphorTemporalFragment",
                 [.rgba16Float, .bgra8Unorm_srgb]
+            ),
+            (
+                "guestPhosphorCachedTemporalFragment",
+                [.rg11b10Float, .bgra8Unorm_srgb]
             )
         ]
     }

@@ -21,6 +21,7 @@ struct ShaderUniforms {
     var yuvRow2: SIMD4<Float>
     var frameData: SIMD4<Float>
     var temporalData: SIMD4<Float>
+    var temporalResponse: SIMD4<Float>
     var tubeData: SIMD4<Float>
     var videoData: SIMD4<Float>
 
@@ -104,6 +105,19 @@ struct ShaderUniforms {
             scanPhase.isFinite ? scanPhase - floor(scanPhase) : 0,
             scanSpan.isFinite ? min(max(scanSpan, 0), 1) : 1
         )
+        let persistence = settings.persistence
+        let lifetime = SIMD3<Float>(
+            0.010 + (0.030 - 0.010) * persistence,
+            0.014 + (0.050 - 0.014) * persistence,
+            0.008 + (0.022 - 0.008) * persistence
+        )
+        let delta = temporalData.y
+        temporalResponse = SIMD4(
+            exp(-delta / lifetime.x),
+            exp(-delta / lifetime.y),
+            exp(-delta / lifetime.z),
+            0.985 + (0.998 - 0.985) * persistence
+        )
         tubeData = SIMD4(
             settings.persistence,
             settings.convergence,
@@ -142,7 +156,9 @@ final class MetalRenderer: NSObject {
     private let textureCache: CVMetalTextureCache
     private let displayLink: CAMetalDisplayLink
     private let diagnostics: MetalFrameDiagnostics?
+    private let frameBudgetController = MetalFrameBudgetController()
     private let inFlightSemaphore = DispatchSemaphore(value: 1)
+    private let statePixelFormat: MTLPixelFormat
 
     private let bypassNV12Pipeline: any MTLRenderPipelineState
     private let bypassBGRAPipeline: any MTLRenderPipelineState
@@ -154,10 +170,11 @@ final class MetalRenderer: NSObject {
     private let glowVerticalPipeline: any MTLRenderPipelineState
     private let bloomHorizontalPipeline: any MTLRenderPipelineState
     private let bloomVerticalPipeline: any MTLRenderPipelineState
-    private let apertureMaskPipeline: any MTLRenderPipelineState
-    private let slotMaskPipeline: any MTLRenderPipelineState
+    private let apertureEmissionPipeline: any MTLRenderPipelineState
+    private let slotEmissionPipeline: any MTLRenderPipelineState
+    private let cachedTemporalPipeline: any MTLRenderPipelineState
 
-    private var output: AVPlayerItemVideoOutput?
+    private var videoSource: (any VideoFrameSource)?
     private var settings = ShaderSettings.default
     private var lastPixelBuffer: CVPixelBuffer?
     private var cachedFrame: PreparedFrame?
@@ -174,6 +191,7 @@ final class MetalRenderer: NSObject {
     private var scanMetadata = VideoScanMetadata.progressive
     private var nominalFrameRate: Float = 0
     private var maximumDisplayFrameRate: Float = 60
+    private var appliedMaximumFrameRate: Float = 60
     private var lastPresentationTimestamp: CFTimeInterval?
 
     init(layer: CAMetalLayer) throws {
@@ -233,7 +251,7 @@ final class MetalRenderer: NSObject {
             )
         }
 
-        func maskPipeline(
+        func emissionPipeline(
             usesSlotMask: Bool,
             label: String
         ) throws -> any MTLRenderPipelineState {
@@ -245,21 +263,26 @@ final class MetalRenderer: NSObject {
                 index: 0
             )
             let fragment = try library.makeFunction(
-                name: "guestPhosphorTemporalFragment",
+                name: "guestPhosphorMaskFragment",
                 constantValues: constants
             )
             return try Self.makePipeline(
                 device: device,
                 vertex: vertex,
                 fragment: fragment,
-                colorPixelFormats: [.rgba16Float, layer.pixelFormat],
+                colorPixelFormat: .rgba16Float,
                 label: label
             )
         }
 
+        let statePixelFormat: MTLPixelFormat = device.supportsFamily(.apple1)
+            ? .rg11b10Float
+            : .rgba16Float
+
         self.device = device
         self.commandQueue = commandQueue
         self.textureCache = textureCache
+        self.statePixelFormat = statePixelFormat
         diagnostics = MetalFrameDiagnostics.makeIfRequested(device: device)
         bypassNV12Pipeline = try pipeline(
             "phosphorBypassFragmentNV12",
@@ -311,13 +334,18 @@ final class MetalRenderer: NSObject {
             .rgba16Float,
             "Guest Bloom Vertical"
         )
-        apertureMaskPipeline = try maskPipeline(
+        apertureEmissionPipeline = try emissionPipeline(
             usesSlotMask: false,
-            label: "Guest Aperture Grille"
+            label: "Guest Aperture Grille Tube Emission"
         )
-        slotMaskPipeline = try maskPipeline(
+        slotEmissionPipeline = try emissionPipeline(
             usesSlotMask: true,
-            label: "Guest Slot Mask"
+            label: "Guest Slot Mask Tube Emission"
+        )
+        cachedTemporalPipeline = try multiTargetPipeline(
+            "guestPhosphorCachedTemporalFragment",
+            [statePixelFormat, layer.pixelFormat],
+            "Guest Cached Temporal Presentation"
         )
 
         layer.device = device
@@ -340,26 +368,27 @@ final class MetalRenderer: NSObject {
     }
 
     func configure(
-        output: AVPlayerItemVideoOutput?,
+        source: (any VideoFrameSource)?,
         settings: ShaderSettings,
         edrHeadroom: Float,
         nominalFrameRate: Float,
         scanMetadata: VideoScanMetadata,
         maximumDisplayFrameRate: Float
     ) {
-        if self.output !== output {
+        if self.videoSource !== source {
+            frameBudgetController.reset()
             lastPixelBuffer = nil
             cachedFrame = nil
             renderTargets = nil
             frameCount = 0
-            needsRedraw = output != nil
-            needsSourceReconstruction = output != nil
+            needsRedraw = source != nil
+            needsSourceReconstruction = source != nil
             awaitingRequestedFrame = false
             lastPresentationTimestamp = nil
         }
         if self.settings != settings {
-            needsRedraw = output != nil
-            needsSourceReconstruction = output != nil
+            needsRedraw = source != nil
+            needsSourceReconstruction = source != nil
             if self.settings.isBypassed != settings.isBypassed
                 || self.settings.rasterMode != settings.rasterMode {
                 renderTargets = nil
@@ -367,8 +396,8 @@ final class MetalRenderer: NSObject {
         }
         if self.scanMetadata != scanMetadata {
             self.scanMetadata = scanMetadata
-            needsRedraw = output != nil
-            needsSourceReconstruction = output != nil
+            needsRedraw = source != nil
+            needsSourceReconstruction = source != nil
             renderTargets = nil
         }
         let sanitizedHeadroom = edrHeadroom.isFinite
@@ -376,19 +405,16 @@ final class MetalRenderer: NSObject {
             : 1
         if self.edrHeadroom != sanitizedHeadroom {
             self.edrHeadroom = sanitizedHeadroom
-            needsRedraw = output != nil
+            needsRedraw = source != nil
+            needsSourceReconstruction = source != nil
         }
-        self.output = output
+        self.videoSource = source
         self.settings = settings
         self.nominalFrameRate = nominalFrameRate
         self.maximumDisplayFrameRate = Self.sanitizedMaximumFrameRate(
             maximumDisplayFrameRate
         )
-        displayLink.preferredFrameRateRange = Self.preferredFrameRateRange(
-            nominalFrameRate: nominalFrameRate,
-            maximumDisplayFrameRate: self.maximumDisplayFrameRate,
-            simulatesCRT: !settings.isBypassed
-        )
+        applyAdaptiveFrameRate(force: true)
         updateDisplayLinkState()
     }
 
@@ -436,7 +462,7 @@ final class MetalRenderer: NSObject {
         let sanitized = time.isFinite ? max(time, 0) : 0
         guard requestedPresentationTime != sanitized else { return }
         requestedPresentationTime = sanitized
-        if !isPlaybackActive, output != nil {
+        if !isPlaybackActive, videoSource != nil {
             needsRedraw = true
             awaitingRequestedFrame = true
             updateDisplayLinkState()
@@ -450,7 +476,7 @@ final class MetalRenderer: NSObject {
         )
         if updatedSize != drawableSize {
             renderTargets = nil
-            needsRedraw = output != nil
+            needsRedraw = videoSource != nil
         }
         drawableSize = updatedSize
         updateDisplayLinkState()
@@ -584,6 +610,7 @@ final class MetalRenderer: NSObject {
 
     /// Encodes one display presentation, refreshing expensive source passes only when needed.
     private func render(_ update: CAMetalDisplayLink.Update) {
+        applyAdaptiveFrameRate()
         guard inFlightSemaphore.wait(timeout: .now()) == .success else {
             return
         }
@@ -663,6 +690,7 @@ final class MetalRenderer: NSObject {
             fieldParity = 1 - fieldParity
         }
 
+        var measuresPresentationOnly = false
         if settings.isBypassed {
             var uniforms = ShaderUniforms(
                 drawableSize: currentDrawableSize,
@@ -724,6 +752,7 @@ final class MetalRenderer: NSObject {
             let reconstructsSource = frameUpdate.isNew
                 || needsSourceReconstruction
                 || !targets.sourceIsValid
+            measuresPresentationOnly = !reconstructsSource
             let advancesHistory = Self.shouldAdvanceHistory(
                 hasNewPixelBuffer: frameUpdate.isNew,
                 historyIsValid: targets.historyIsValid
@@ -803,29 +832,66 @@ final class MetalRenderer: NSObject {
                 ) else {
                     return
                 }
+
+                let emissionPipeline = settings.maskPattern == .slotMask
+                    ? slotEmissionPipeline
+                    : apertureEmissionPipeline
+                var evenUniforms = uniforms
+                evenUniforms.videoData.y = 0
+                guard encodePass(
+                    commandBuffer: commandBuffer,
+                    pipeline: emissionPipeline,
+                    target: targets.tubeEmission[0],
+                    textures: [
+                        targets.sharpened,
+                        targets.bloom,
+                        targets.prepassLinearized,
+                        targets.glow,
+                        currentRaw
+                    ],
+                    uniforms: &evenUniforms,
+                    label: "7 Cache Native Tube Emission"
+                ) else {
+                    return
+                }
+                if interlaced {
+                    var oddUniforms = uniforms
+                    oddUniforms.videoData.y = 1
+                    guard encodePass(
+                        commandBuffer: commandBuffer,
+                        pipeline: emissionPipeline,
+                        target: targets.tubeEmission[1],
+                        textures: [
+                            targets.sharpened,
+                            targets.bloom,
+                            targets.prepassLinearized,
+                            targets.glow,
+                            currentRaw
+                        ],
+                        uniforms: &oddUniforms,
+                        label: "7b Cache Odd-field Tube Emission"
+                    ) else {
+                        return
+                    }
+                }
                 targets.sourceIsValid = true
             }
 
             let presentationWriteIndex = 1 - targets.presentationReadIndex
+            let emissionIndex = interlaced && fieldParity >= 0.5 ? 1 : 0
             guard encodePass(
                 commandBuffer: commandBuffer,
-                pipeline: settings.maskPattern == .slotMask
-                    ? slotMaskPipeline
-                    : apertureMaskPipeline,
+                pipeline: cachedTemporalPipeline,
                 targets: [
                     targets.presentation[presentationWriteIndex],
                     drawable.texture
                 ],
                 textures: [
-                    targets.sharpened,
-                    targets.bloom,
-                    targets.prepassLinearized,
-                    targets.glow,
-                    currentRaw,
+                    targets.tubeEmission[emissionIndex],
                     targets.presentation[targets.presentationReadIndex]
                 ],
                 uniforms: &uniforms,
-                label: "7 Display-rate Beam, Phosphor State, Mask, and Glass"
+                label: "8 Display-rate Beam Sweep and Phosphor State"
             ) else {
                 return
             }
@@ -845,9 +911,19 @@ final class MetalRenderer: NSObject {
         let semaphore = inFlightSemaphore
         let resources = frame.resources
         let diagnostics = diagnostics
+        let frameBudgetController = frameBudgetController
+        let measuredDisplayMaximum = maximumDisplayFrameRate
+        let shouldMeasurePresentation = measuresPresentationOnly
         commandBuffer.addCompletedHandler { completedBuffer in
             _ = resources
             diagnostics?.completeFrame(commandBuffer: completedBuffer)
+            if shouldMeasurePresentation,
+               completedBuffer.gpuEndTime > completedBuffer.gpuStartTime {
+                frameBudgetController.recordPresentation(
+                    gpuDuration: completedBuffer.gpuEndTime - completedBuffer.gpuStartTime,
+                    displayMaximum: measuredDisplayMaximum
+                )
+            }
             semaphore.signal()
         }
         commandBuffer.present(drawable)
@@ -932,32 +1008,31 @@ final class MetalRenderer: NSObject {
         renderTargets = GuestRenderTargets(
             device: device,
             rasterSize: rasterSize,
-            drawableSize: drawableSize
+            drawableSize: drawableSize,
+            statePixelFormat: statePixelFormat,
+            usesSeparateFields: Self.isInterlaced(
+                rasterMode: settings.rasterMode,
+                scanMetadata: scanMetadata
+            )
         )
         return renderTargets
     }
 
     private func pixelBuffer(forHostTime hostTime: CFTimeInterval) -> VideoFrameUpdate? {
-        guard let output else {
+        guard let videoSource else {
             guard let lastPixelBuffer else { return nil }
             return VideoFrameUpdate(pixelBuffer: lastPixelBuffer, isNew: false)
         }
 
         let usesRequestedTime = !isPlaybackActive && requestedPresentationTime != nil
-        let itemTime = usesRequestedTime
-            ? CMTime(
-                seconds: requestedPresentationTime ?? 0,
-                preferredTimescale: 600
-            )
-            : output.itemTime(forHostTime: hostTime)
-        if output.hasNewPixelBuffer(forItemTime: itemTime),
-           let pixelBuffer = output.copyPixelBuffer(
-               forItemTime: itemTime,
-               itemTimeForDisplay: nil
-           ) {
-            lastPixelBuffer = pixelBuffer
+        if let update = videoSource.frame(
+            forHostTime: hostTime,
+            requestedTime: usesRequestedTime ? requestedPresentationTime : nil,
+            isPlaying: isPlaybackActive
+        ) {
+            lastPixelBuffer = update.pixelBuffer
             awaitingRequestedFrame = false
-            return VideoFrameUpdate(pixelBuffer: pixelBuffer, isNew: true)
+            return update
         }
         if usesRequestedTime, awaitingRequestedFrame {
             return nil
@@ -970,8 +1045,21 @@ final class MetalRenderer: NSObject {
     private func updateDisplayLinkState() {
         let needsContinuousCRT = !settings.isBypassed
             && isPresentationVisible
-            && output != nil
+            && videoSource != nil
         displayLink.isPaused = !(needsContinuousCRT || isPlaybackActive || needsRedraw)
+    }
+
+    private func applyAdaptiveFrameRate(force: Bool = false) {
+        let adaptiveMaximum = frameBudgetController.maximumFrameRate(
+            displayMaximum: maximumDisplayFrameRate
+        )
+        guard force || adaptiveMaximum != appliedMaximumFrameRate else { return }
+        appliedMaximumFrameRate = adaptiveMaximum
+        displayLink.preferredFrameRateRange = Self.preferredFrameRateRange(
+            nominalFrameRate: nominalFrameRate,
+            maximumDisplayFrameRate: adaptiveMaximum,
+            simulatesCRT: !settings.isBypassed
+        )
     }
 
     /// Keeps the Core Video-to-Metal wrappers for the current decoded frame alive.
@@ -1106,11 +1194,6 @@ final class MetalRenderer: NSObject {
     }
 }
 
-private struct VideoFrameUpdate {
-    let pixelBuffer: CVPixelBuffer
-    let isNew: Bool
-}
-
 extension MetalRenderer: CAMetalDisplayLinkDelegate {
     func metalDisplayLink(
         _ link: CAMetalDisplayLink,
@@ -1140,6 +1223,7 @@ private final class GuestRenderTargets {
     let lightHorizontal: any MTLTexture
     let glow: any MTLTexture
     let bloom: any MTLTexture
+    let tubeEmission: [any MTLTexture]
 
     var rawReadIndex = 0
     var rawIsValid = false
@@ -1152,16 +1236,19 @@ private final class GuestRenderTargets {
     init?(
         device: any MTLDevice,
         rasterSize: SIMD2<Int>,
-        drawableSize: SIMD2<Int>
+        drawableSize: SIMD2<Int>,
+        statePixelFormat: MTLPixelFormat,
+        usesSeparateFields: Bool
     ) {
         func texture(
             width: Int,
             height: Int,
-            label: String
+            label: String,
+            pixelFormat: MTLPixelFormat = .rgba16Float
         ) -> (any MTLTexture)? {
             guard width > 0, height > 0 else { return nil }
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .rgba16Float,
+                pixelFormat: pixelFormat,
                 width: width,
                 height: height,
                 mipmapped: false
@@ -1211,16 +1298,38 @@ private final class GuestRenderTargets {
             width: rasterSize.x,
             height: 600,
             label: "Guest Bloom"
+        ), let tubeEmission0 = texture(
+            width: drawableSize.x,
+            height: drawableSize.y,
+            label: "Cached Tube Emission Even"
         ), let presentation0 = texture(
             width: drawableSize.x,
             height: drawableSize.y,
-            label: "Phosphor Excitation A"
+            label: "Phosphor Excitation A",
+            pixelFormat: statePixelFormat
         ), let presentation1 = texture(
             width: drawableSize.x,
             height: drawableSize.y,
-            label: "Phosphor Excitation B"
+            label: "Phosphor Excitation B",
+            pixelFormat: statePixelFormat
         ) else {
             return nil
+        }
+
+        let tubeEmission1: any MTLTexture
+        if usesSeparateFields {
+            guard let separateOddEmission = texture(
+                width: drawableSize.x,
+                height: drawableSize.y,
+                label: "Cached Tube Emission Odd"
+            ) else {
+                return nil
+            }
+            tubeEmission1 = separateOddEmission
+        } else {
+            // Progressive sources share one immutable emission solution. At 4K
+            // this avoids a redundant 64 MiB RGBA16Float texture.
+            tubeEmission1 = tubeEmission0
         }
 
         self.rasterSize = rasterSize
@@ -1233,6 +1342,7 @@ private final class GuestRenderTargets {
         self.lightHorizontal = lightHorizontal
         self.glow = glow
         self.bloom = bloom
+        tubeEmission = [tubeEmission0, tubeEmission1]
     }
 }
 

@@ -1,8 +1,7 @@
-import AVFoundation
 import SwiftUI
 
 struct MetalVideoRepresentable: NSViewRepresentable {
-    let output: AVPlayerItemVideoOutput?
+    let source: (any VideoFrameSource)?
     let settings: ShaderSettings
     let active: Bool
     let presentationTime: TimeInterval
@@ -13,7 +12,7 @@ struct MetalVideoRepresentable: NSViewRepresentable {
     func makeNSView(context: Context) -> MetalVideoView {
         let view = MetalVideoView(frame: .zero)
         view.configure(
-            output: output,
+            source: source,
             settings: settings,
             presentationTime: presentationTime,
             nominalFrameRate: nominalFrameRate,
@@ -26,7 +25,7 @@ struct MetalVideoRepresentable: NSViewRepresentable {
 
     func updateNSView(_ nsView: MetalVideoView, context: Context) {
         nsView.configure(
-            output: output,
+            source: source,
             settings: settings,
             presentationTime: presentationTime,
             nominalFrameRate: nominalFrameRate,

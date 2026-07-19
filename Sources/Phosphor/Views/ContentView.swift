@@ -44,7 +44,7 @@ struct ContentView: View {
             Color.black
 
             MetalVideoRepresentable(
-                output: store.videoOutput,
+                source: store.frameSource,
                 settings: controlPreferences.shaderSettings,
                 active: store.transport == .playing,
                 presentationTime: store.currentTime,

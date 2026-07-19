@@ -184,8 +184,8 @@ final class RendererUniformTests: XCTestCase {
     }
 
     func testShaderUniformLayoutMatchesMetalLayout() {
-        XCTAssertEqual(MemoryLayout<ShaderUniforms>.size, 272)
-        XCTAssertEqual(MemoryLayout<ShaderUniforms>.stride, 272)
+        XCTAssertEqual(MemoryLayout<ShaderUniforms>.size, 288)
+        XCTAssertEqual(MemoryLayout<ShaderUniforms>.stride, 288)
         XCTAssertEqual(MemoryLayout<ShaderUniforms>.alignment, 16)
     }
 
@@ -225,6 +225,8 @@ final class RendererUniformTests: XCTestCase {
         XCTAssertEqual(uniforms.guestScan, SIMD4(0.68, 0.62, 1.0, 2.30))
         XCTAssertEqual(uniforms.guestMask, SIMD4(6.0, 1.06, 2.30, 1.0))
         XCTAssertEqual(uniforms.frameData.z, 1)
+        XCTAssertTrue(uniforms.temporalResponse.x.isFinite)
+        XCTAssertGreaterThan(uniforms.temporalResponse.w, 0.98)
         XCTAssertEqual(uniforms.tubeData, SIMD4(0.17, 0.18, 0.19, 2))
         XCTAssertEqual(uniforms.videoData.z, 2)
     }

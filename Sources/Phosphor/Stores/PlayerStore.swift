@@ -12,6 +12,9 @@ final class PlayerStore {
     @ObservationIgnored
     private(set) var videoOutput: AVPlayerItemVideoOutput?
 
+    @ObservationIgnored
+    private(set) var frameSource: (any VideoFrameSource)?
+
     private(set) var transport: PlayerTransport = .empty
     private(set) var currentTime: TimeInterval = 0
     private(set) var duration: TimeInterval = 0
@@ -25,6 +28,12 @@ final class PlayerStore {
 
     @ObservationIgnored
     private var timeObserver: PlayerTimeObserver?
+
+    @ObservationIgnored
+    private var directPlaybackSession: FFmpegPlaybackSession?
+
+    @ObservationIgnored
+    private var directTimeTimer: Timer?
 
     @ObservationIgnored
     private var loadGeneration = 0
@@ -49,6 +58,14 @@ final class PlayerStore {
         timeObserver = PlayerTimeObserver(player: player) { [weak self] time in
             MainActor.assumeIsolated {
                 self?.updateTime(time)
+            }
+        }
+        directTimeTimer = Timer.scheduledTimer(
+            withTimeInterval: 0.1,
+            repeats: true
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.updateDirectPlaybackTime()
             }
         }
     }
@@ -86,9 +103,14 @@ final class PlayerStore {
 
         switch transport {
         case .playing:
-            player.play()
+            if let directPlaybackSession {
+                directPlaybackSession.play()
+            } else {
+                player.play()
+            }
         case .empty, .paused:
             player.pause()
+            directPlaybackSession?.pause()
         }
     }
 
@@ -97,13 +119,18 @@ final class PlayerStore {
 
         let target = Self.clamped(time, upperBound: duration, nanDefault: 0)
         currentTime = target
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+        if let directPlaybackSession {
+            directPlaybackSession.seek(to: target)
+        } else {
+            player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+        }
     }
 
     func setVolume(_ newValue: Float) {
         let sanitized = newValue.isNaN ? 1 : newValue
         volume = min(max(sanitized, 0), 1)
         player.volume = volume
+        directPlaybackSession?.volume = volume
     }
 
     private func load(url: URL, generation: Int) async {
@@ -112,8 +139,11 @@ final class PlayerStore {
 
             guard generation == loadGeneration else { return }
 
+            directPlaybackSession?.pause()
+            directPlaybackSession = prepared.ffmpegSession
             player.replaceCurrentItem(with: prepared.item)
             videoOutput = prepared.output
+            frameSource = prepared.frameSource
             currentURL = url
             currentTime = 0
             duration = Self.finiteNonnegative(prepared.duration)
@@ -128,7 +158,12 @@ final class PlayerStore {
             }
             transport = .playing
             isLoading = false
-            player.play()
+            if let directPlaybackSession {
+                directPlaybackSession.volume = volume
+                directPlaybackSession.play()
+            } else {
+                player.play()
+            }
         } catch is CancellationError {
             if generation == loadGeneration {
                 isLoading = false
@@ -142,7 +177,7 @@ final class PlayerStore {
     }
 
     private func updateTime(_ time: CMTime) {
-        guard hasMedia else { return }
+        guard hasMedia, directPlaybackSession == nil else { return }
 
         currentTime = Self.finiteNonnegative(time.seconds)
         if let item = player.currentItem {
@@ -150,6 +185,15 @@ final class PlayerStore {
             if itemDuration > 0 {
                 duration = itemDuration
             }
+        }
+    }
+
+    private func updateDirectPlaybackTime() {
+        guard let directPlaybackSession, hasMedia else { return }
+        currentTime = Self.finiteNonnegative(directPlaybackSession.currentTime)
+        if duration > 0, currentTime >= duration, transport == .playing {
+            directPlaybackSession.pause()
+            transport = .paused
         }
     }
 
@@ -176,10 +220,8 @@ final class PlayerStore {
             "This file cannot be played."
         case PlayerLoadError.noVideoTrack:
             "This file has no video track."
-        case PlayerLoadError.ffmpegUnavailable:
-            "FFmpeg is required for this format. Install it with: brew install ffmpeg"
         case PlayerLoadError.ffmpegFailed:
-            "FFmpeg could not prepare this video for playback."
+            "Bundled FFmpeg could not decode this video."
         default:
             "The video could not be opened."
         }

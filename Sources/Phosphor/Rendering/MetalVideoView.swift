@@ -8,7 +8,7 @@ import QuartzCore
 final class MetalVideoView: NSView {
     private var renderer: MetalRenderer?
     private var requestedActive = false
-    private var configuredOutput: AVPlayerItemVideoOutput?
+    private var configuredSource: (any VideoFrameSource)?
     private var configuredSettings = ShaderSettings.default
     private var configuredPresentationTime: TimeInterval = 0
     private var configuredNominalFrameRate: Float = 0
@@ -63,14 +63,14 @@ final class MetalVideoView: NSView {
     }
 
     func configure(
-        output: AVPlayerItemVideoOutput?,
+        source: (any VideoFrameSource)?,
         settings: ShaderSettings,
         presentationTime: TimeInterval,
         nominalFrameRate: Float,
         scanMetadata: VideoScanMetadata,
         edrPhosphors: Bool
     ) {
-        configuredOutput = output
+        configuredSource = source
         configuredSettings = settings
         configuredPresentationTime = presentationTime
         configuredNominalFrameRate = nominalFrameRate
@@ -78,7 +78,7 @@ final class MetalVideoView: NSView {
         requestsEDRPhosphors = edrPhosphors
         updateDisplayConfigurationIfNeeded()
         renderer?.configure(
-            output: output,
+            source: source,
             settings: settings,
             edrHeadroom: displayConfiguration?.headroom ?? 1,
             nominalFrameRate: nominalFrameRate,
@@ -167,7 +167,7 @@ final class MetalVideoView: NSView {
 
         renderer = try? MetalRenderer(layer: metalLayer)
         renderer?.configure(
-            output: configuredOutput,
+            source: configuredSource,
             settings: configuredSettings,
             edrHeadroom: updatedConfiguration.headroom,
             nominalFrameRate: configuredNominalFrameRate,

@@ -39,6 +39,7 @@ struct alignas(16) ShaderUniforms {
     float4 yuvRow2;
     float4 frameData;
     float4 temporalData;
+    float4 temporalResponse;
     float4 tubeData;
     float4 videoData;
 };
@@ -640,15 +641,27 @@ fragment float4 guestGlowHorizontalFragment(
         floor(uniforms.rasterSize.xy * input.uv) + 0.5
     ) * uniforms.rasterSize.zw;
     float2 dx = float2(uniforms.rasterSize.z, 0.0);
-    for (int offset = -6; offset <= 6; ++offset) {
-        float weight = guestGaussian(float(offset) + fraction, 2.00);
+    // Pair adjacent Gaussian taps and let the texture unit perform their
+    // weighted interpolation. This preserves the 13-tap footprint with seven
+    // samples, which is considerably friendlier to Apple GPU texture pipes.
+    for (int firstOffset = -6; firstOffset <= 4; firstOffset += 2) {
+        float firstWeight = guestGaussian(float(firstOffset) + fraction, 2.00);
+        float secondWeight = guestGaussian(float(firstOffset + 1) + fraction, 2.00);
+        float pairWeight = firstWeight + secondWeight;
+        float pairOffset = float(firstOffset) + secondWeight / pairWeight;
         float3 pixel = guestHighlightEnergy(source.sample(
             phosphorLinearSampler,
-            center + float(offset) * dx
+            center + pairOffset * dx
         ).rgb);
-        color += weight * pixel;
-        weightSum += weight;
+        color += pairWeight * pixel;
+        weightSum += pairWeight;
     }
+    float finalWeight = guestGaussian(6.0 + fraction, 2.00);
+    color += finalWeight * guestHighlightEnergy(source.sample(
+        phosphorLinearSampler,
+        center + 6.0 * dx
+    ).rgb);
+    weightSum += finalWeight;
     return float4(color / weightSum, 1.0);
 }
 
@@ -666,14 +679,23 @@ fragment float4 guestGlowVerticalFragment(
             * uniforms.rasterSize.w
     );
     float2 dy = float2(0.0, uniforms.rasterSize.w);
-    for (int offset = -6; offset <= 6; ++offset) {
-        float weight = guestGaussian(float(offset) + fraction, 2.00);
-        color += weight * source.sample(
+    for (int firstOffset = -6; firstOffset <= 4; firstOffset += 2) {
+        float firstWeight = guestGaussian(float(firstOffset) + fraction, 2.00);
+        float secondWeight = guestGaussian(float(firstOffset + 1) + fraction, 2.00);
+        float pairWeight = firstWeight + secondWeight;
+        float pairOffset = float(firstOffset) + secondWeight / pairWeight;
+        color += pairWeight * source.sample(
             phosphorLinearSampler,
-            center + float(offset) * dy
+            center + pairOffset * dy
         ).rgb;
-        weightSum += weight;
+        weightSum += pairWeight;
     }
+    float finalWeight = guestGaussian(6.0 + fraction, 2.00);
+    color += finalWeight * source.sample(
+        phosphorLinearSampler,
+        center + 6.0 * dy
+    ).rgb;
+    weightSum += finalWeight;
     return float4(color / weightSum, 1.0);
 }
 
@@ -1257,5 +1279,54 @@ fragment GuestTemporalOutput guestPhosphorTemporalFragment(
         min(integratedPresentation, max(uniforms.frameData.z, 1.0)),
         1.0
     );
+    return output;
+}
+
+// Live presentation entry point. The expensive tube/beam/optical solution is
+// cached only when the decoded source changes. This native-refresh pass keeps
+// the time-domain CRT behavior while reducing the per-pixel work to one cached
+// emission sample, one state sample, and half-precision persistence math.
+fragment GuestTemporalOutput guestPhosphorCachedTemporalFragment(
+    FullscreenVertex input [[stage_in]],
+    constant ShaderUniforms &uniforms [[buffer(0)]],
+    texture2d<half> cachedEmission [[texture(0)]],
+    texture2d<half> previousExcitation [[texture(1)]]
+) {
+    half3 instantaneous = cachedEmission.sample(
+        phosphorLinearSampler,
+        input.uv
+    ).rgb;
+    half3 state = instantaneous;
+
+    if (uniforms.videoData.w >= 0.5) {
+        half3 previous = previousExcitation.sample(
+            phosphorLinearSampler,
+            input.uv
+        ).rgb;
+        half3 decay = half3(uniforms.temporalResponse.xyz);
+        half3 decayed = previous * decay;
+        half distanceBehindBeam = half(fract(
+            uniforms.temporalData.z - input.uv.y + 1.0
+        ));
+        half edgeWidth = half(max(2.0 * uniforms.drawableSize.w, 0.00001));
+        half swept = 1.0h - smoothstep(
+            half(uniforms.temporalData.w) - edgeWidth,
+            half(uniforms.temporalData.w) + edgeWidth,
+            distanceBehindBeam
+        );
+        state = mix(decayed, max(decayed, instantaneous), swept);
+    }
+
+    GuestTemporalOutput output;
+    output.excitation = float4(float3(state), 1.0);
+    half exposureFloor = half(uniforms.temporalResponse.w);
+    half3 integratedPresentation = max(
+        state,
+        instantaneous * exposureFloor
+    );
+    output.display = float4(float3(min(
+        integratedPresentation,
+        half3(max(uniforms.frameData.z, 1.0))
+    )), 1.0);
     return output;
 }

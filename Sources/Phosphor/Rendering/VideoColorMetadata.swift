@@ -5,6 +5,10 @@ struct VideoColorMetadata: Equatable, Sendable {
 
     let containsHDRVideo: Bool
 
+    init(containsHDRVideo: Bool) {
+        self.containsHDRVideo = containsHDRVideo
+    }
+
     init(mediaCharacteristics: Set<AVMediaCharacteristic>) {
         containsHDRVideo = mediaCharacteristics.contains(.containsHDRVideo)
     }

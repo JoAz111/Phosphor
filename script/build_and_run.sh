@@ -8,10 +8,10 @@ MIN_SYSTEM_VERSION="14.0"
 CONFIGURATION="release"
 
 case "$MODE" in
-  run|--verify|verify|--debug|debug|--logs|logs|--telemetry|telemetry)
+  run|--verify|verify|--debug|debug|--logs|logs|--telemetry|telemetry|--package|package)
     ;;
   *)
-    echo "usage: $0 [--verify|--debug|--logs|--telemetry]" >&2
+    echo "usage: $0 [--verify|--debug|--logs|--telemetry|--package]" >&2
     exit 2
     ;;
 esac
@@ -21,7 +21,7 @@ if [[ "$MODE" == "--debug" || "$MODE" == "debug" ]]; then
 fi
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: $0 [--verify|--debug|--logs|--telemetry]" >&2
+  echo "usage: $0 [--verify|--debug|--logs|--telemetry|--package]" >&2
   exit 2
 fi
 
@@ -40,8 +40,10 @@ STAGED_APP_BUNDLE="$STAGING_DIR/$APP_NAME.app"
 APP_CONTENTS="$STAGED_APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
+APP_FRAMEWORKS="$APP_CONTENTS/Frameworks"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
+FFMPEG_PREFIX="${PHOSPHOR_FFMPEG_PREFIX:-/opt/homebrew/opt/ffmpeg}"
 
 cd "$ROOT_DIR"
 
@@ -87,14 +89,21 @@ for required_path in "$BUILD_BINARY" "$BUILD_RESOURCE_BUNDLE" "$BUILD_ICON" "$PR
 done
 
 /bin/rm -rf "$STAGED_APP_BUNDLE"
-/bin/mkdir -p "$APP_MACOS" "$APP_RESOURCES"
+/bin/mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_FRAMEWORKS"
 /bin/cp "$BUILD_BINARY" "$APP_BINARY"
 /bin/chmod +x "$APP_BINARY"
 /bin/cp -R "$BUILD_RESOURCE_BUNDLE" "$APP_RESOURCES/"
 /bin/cp "$BUILD_ICON" "$APP_RESOURCES/Phosphor.icns"
 /bin/cp "$PROJECT_LICENSE" "$APP_RESOURCES/COPYING"
+if [[ -d "$FFMPEG_PREFIX/share/licenses/ffmpeg" ]]; then
+  /bin/mkdir -p "$APP_RESOURCES/ThirdParty/FFmpeg"
+  /bin/cp -R "$FFMPEG_PREFIX/share/licenses/ffmpeg/." \
+    "$APP_RESOURCES/ThirdParty/FFmpeg/"
+fi
+"$ROOT_DIR/script/bundle_dylibs.sh" "$APP_BINARY" "$APP_FRAMEWORKS"
 
 /usr/bin/xcrun -sdk macosx metal \
+  -ffast-math \
   -c "$METAL_SOURCE" \
   -o "$METAL_AIR"
 /usr/bin/xcrun -sdk macosx metallib \
@@ -159,8 +168,19 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
+SIGNING_IDENTITY="${PHOSPHOR_CODESIGN_IDENTITY:--}"
+SIGNING_ARGUMENTS=(--force --sign "$SIGNING_IDENTITY")
+if [[ "$SIGNING_IDENTITY" == "-" ]]; then
+  SIGNING_ARGUMENTS+=(--timestamp=none)
+else
+  SIGNING_ARGUMENTS+=(--options runtime --timestamp)
+fi
+
 /usr/bin/xattr -cr "$STAGED_APP_BUNDLE"
-/usr/bin/codesign --force --sign - "$STAGED_APP_BUNDLE"
+while IFS= read -r nested_binary; do
+  /usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" "$nested_binary"
+done < <(/usr/bin/find "$APP_FRAMEWORKS" -type f -name '*.dylib' -print)
+/usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" "$STAGED_APP_BUNDLE"
 /usr/bin/codesign --verify --deep --strict "$STAGED_APP_BUNDLE"
 
 /bin/mkdir -p "$DIST_DIR"
@@ -192,6 +212,9 @@ wait_for_process() {
 }
 
 case "$MODE" in
+  --package|package)
+    echo "$APP_BUNDLE"
+    ;;
   run)
     open_app
     ;;

@@ -60,25 +60,31 @@ break a sweat.
   faceplate scatter spread light through the tube.
 - **Analog inputs.** Select clean RGB, bandwidth-limited S-Video, NTSC composite,
   or PAL composite with chroma delay, dot crawl, and cross-color behavior.
-- **Built to run like butter.** Video frames enter Metal without a CPU-side
-  image copy and remain on the GPU through the entire CRT graph. Phosphor only
-  performs the expensive work when the video actually produces a new frame.
+- **Built to run like butter.** Hardware-decoded frames enter Metal through
+  `CVPixelBuffer` surfaces and remain on the GPU through the CRT graph. Phosphor
+  reconstructs the tube only when the video produces a new frame.
 
 ## Looks heavy. Runs light.
 
 Phosphor is hyper-optimized around the architecture of Apple silicon. Video
 frames become Metal textures through `CVMetalTextureCache`; the complete CRT
 graph is encoded into one command buffer; intermediate images remain in private
-`RGBA16Float` GPU textures; and the final `CAMetalLayer` is framebuffer-only.
-There is no CPU readback in the playback path.
+GPU textures; and the final `CAMetalLayer` is framebuffer-only. There is no CPU
+readback in the playback path.
 
 Rendering uses two deliberately different clocks. A 24 fps movie gets 24 costly
-source-reconstruction updates per second. A much lighter final pass follows the
-Mac display—up to 120 Hz or beyond—to advance the beam and phosphor state. That
-is what preserves temporal CRT behavior without rerunning the full graph for
-duplicate video frames. Pipeline states are created up front, mask variants are
-specialized with Metal function constants, occluded windows stop presenting,
-and in-flight work is deliberately bounded to keep playback responsive.
+source-reconstruction updates per second. That work produces a cached,
+native-resolution tube-emission texture. A much lighter half-precision temporal
+pass follows the Mac display—up to 120 Hz or beyond—to advance channel-specific
+phosphor decay without rerunning the full graph for duplicate video frames.
+Excitation history uses Apple's compact `RG11B10Float` format where supported,
+the wide glow kernel is folded into paired bilinear samples, mask variants are
+specialized up front, and in-flight work is deliberately bounded.
+
+Phosphor also measures the final pass with Metal's GPU timestamps. If a display
+cadence is genuinely unsustainable, it settles on a stable lower presentation
+rate instead of building latency or stuttering, then restores high refresh
+after sustained headroom. Occluded windows stop presenting entirely.
 
 That is how Phosphor can simulate a beam, persistence, bloom, glow, individual
 RGB phosphors, and curved glass in real time while still feeling like a tiny,
@@ -86,34 +92,55 @@ effortless native Mac app—not a GPU benchmark wearing video-player controls.
 
 ## Play almost anything
 
-QuickTime-compatible media opens directly through AVFoundation. For Matroska,
-AVI, WebM, and uncommon codecs, Phosphor can fall back to FFmpeg:
+QuickTime-compatible media opens directly through AVFoundation. Matroska, AVI,
+WebM, and uncommon codecs fall back to FFmpeg's libraries inside Phosphor. The
+decoder reads the original file directly into a bounded in-memory frame queue,
+prefers VideoToolbox hardware decoding, and sends audio straight to
+`AVAudioEngine`.
 
-1. Try a fast, lossless container remux.
-2. If the codec is incompatible, create a high-quality H.264/AAC playback copy.
-3. Cache the prepared copy without modifying the original video.
-
-The compatibility path prefers Apple VideoToolbox, then falls back to `libx264`
-and a portable MPEG-4 encoder. Install FFmpeg with:
-
-```sh
-brew install ffmpeg
-```
+**Phosphor never invokes the `ffmpeg` command, remuxes the video, converts it,
+or creates a prepared playback copy.** The original file is the only media file
+it reads.
 
 ## Build from source
 
-You will need an Apple Silicon Mac, macOS 14 or later, and the Xcode command-line
-tools with Swift 6.
+You will need an Apple Silicon Mac, macOS 14 or later, Xcode with the Metal
+toolchain, and FFmpeg's development libraries for a quick local build.
 
 ```sh
 git clone https://github.com/JoAz111/Phosphor.git
 cd Phosphor
+brew install ffmpeg
 ./script/build_and_run.sh
 ```
 
 The script creates an optimized, ad-hoc-signed app at `dist/Phosphor.app` and
-launches it. It also installs the app icon, Metal source, file-type declarations,
-and GPL notice into the bundle.
+launches it. The app icon, compiled Metal library, compatible FFmpeg libraries,
+file declarations, and license notices live inside that `.app`; the resulting
+bundle does not need Homebrew on the destination Mac.
+
+### Build a signed GitHub release
+
+The release builder downloads and checksum-verifies pinned FFmpeg 8.1.2 source,
+builds only its local playback libraries for arm64/macOS 14, links them
+statically into Phosphor, enables the hardened runtime, and produces
+`dist/Phosphor.zip`:
+
+```sh
+./script/build_release.sh "Developer ID Application: Your Name (TEAMID)"
+```
+
+To submit, staple, and repackage it in the same pass, first save notarytool
+credentials in a Keychain profile and provide that profile name:
+
+```sh
+./script/build_release.sh \
+  "Developer ID Application: Your Name (TEAMID)" \
+  "phosphor-notary"
+```
+
+The release build contains no FFmpeg executable and no non-system dynamic
+library dependency. Upload `dist/Phosphor.zip` to GitHub Releases.
 
 Useful development modes:
 
@@ -139,17 +166,18 @@ Useful development modes:
 ## How it works
 
 ```text
-AVFoundation video
-  → zero-copy CVMetalTextureCache input
+AVFoundation or in-process FFmpeg decode
+  → VideoToolbox CVPixelBuffer / Metal-compatible software fallback
+  → CVMetalTextureCache input
   → RGB / S-Video / NTSC / PAL signal reconstruction
   → encoded current/previous frame buffers
   → source history and color prepass
   → Guest 1.8-gamma linearization
   → horizontal reconstruction
-  → glow and bloom diffusion
-  → display-rate beam and optional alternating fields
-  → native-resolution RGB phosphor excitation and decay
-  → physical-pixel aperture grille or 2D slot lattice and glass
+  → folded glow and bloom diffusion
+  → cached native-resolution tube emission with optional alternating fields
+  → display-rate, channel-specific RGB phosphor excitation and decay
+  → physical-pixel aperture grille or 2D slot lattice, halation, and glass
   → CAMetalLayer
 ```
 
@@ -180,7 +208,6 @@ Still to come:
 - Optional color LUTs and the remaining Guest shadow-mask patterns
 - Additional shadow-mask geometries and VGA-specific branches
 - Calibrated RF input, vertical sync instability, and service-menu controls
-- A redistributable bundled FFmpeg build for signed releases
 - HDR-native output rather than the current clearly identified SDR path
 
 ## Development
@@ -195,8 +222,9 @@ DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
 The suite includes live-GPU checks for every Metal entry point, Guest's input
 gamma, channel-specific phosphor decay, alternating interlaced fields,
 luminance-dependent raster lines, discrete RGB phosphors, the two-dimensional
-slot lattice and black matrix, and true bypass. It also exercises a real
-FFmpeg-to-AVFoundation Matroska compatibility path.
+slot lattice and black matrix, adaptive GPU budgeting, and true bypass. It also
+decodes a real Matroska file through the in-process FFmpeg path and verifies
+that playback creates no prepared media.
 
 <details>
 <summary>Project structure</summary>
@@ -207,7 +235,7 @@ Sources/Phosphor/
   Models/       Rendering and playback value types
   Rendering/    CAMetalLayer integration, frame graph, and color conversion
   Resources/    Metal shaders and application icon
-  Stores/       AVFoundation playback state and media preparation
+  Stores/       AVFoundation and direct FFmpeg playback state
   Views/        SwiftUI controls and AppKit/Metal bridge
 Tests/          CPU and live-GPU regression tests
 script/         Build, bundle, launch, and debugging entry point
@@ -227,6 +255,9 @@ the Libretro shader community. The current translation is based on upstream
 commit [`3b0d6aa`](https://github.com/libretro/slang-shaders/commit/3b0d6aa1d134a168478cd9c904a866d969f8882b).
 Portions of the mask logic originate in Timothy Lottes' public-domain CRT shader.
 
-Phosphor invokes FFmpeg as an independent executable when compatibility playback
-is needed. See [ffmpeg.org](https://ffmpeg.org/) for FFmpeg's source and license
-information.
+Phosphor links FFmpeg's `libavformat`, `libavcodec`, `libavutil`, `libswscale`,
+and `libswresample` libraries for compatibility playback. Release builds pin
+FFmpeg 8.1.2 and reproduce the exact library configuration in
+`script/build_ffmpeg.sh`; see [ffmpeg.org](https://ffmpeg.org/) for its source
+and LGPL license information. FFmpeg remains a separate third-party project and
+is not endorsed by or affiliated with Phosphor.

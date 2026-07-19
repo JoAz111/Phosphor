@@ -4,9 +4,11 @@ import CoreVideo
 typealias PlayerAssetLoading =
     @MainActor @Sendable (URL) async throws -> PreparedPlayerAsset
 
-struct PreparedPlayerAsset: Sendable {
-    let item: AVPlayerItem
-    let output: AVPlayerItemVideoOutput
+struct PreparedPlayerAsset: @unchecked Sendable {
+    let item: AVPlayerItem?
+    let output: AVPlayerItemVideoOutput?
+    let frameSource: any VideoFrameSource
+    let ffmpegSession: FFmpegPlaybackSession?
     let duration: TimeInterval
     let nominalFrameRate: Float
     let scanMetadata: VideoScanMetadata
@@ -24,6 +26,8 @@ struct PreparedPlayerAsset: Sendable {
     ) {
         self.item = item
         self.output = output
+        frameSource = AVFoundationVideoFrameSource(output: output)
+        ffmpegSession = nil
         self.duration = duration
         self.nominalFrameRate = nominalFrameRate
         self.scanMetadata = scanMetadata
@@ -31,8 +35,22 @@ struct PreparedPlayerAsset: Sendable {
         self.preparation = preparation
     }
 
+    @MainActor
+    init(ffmpegSession: FFmpegPlaybackSession) {
+        item = nil
+        output = nil
+        frameSource = ffmpegSession.frameSource
+        self.ffmpegSession = ffmpegSession
+        duration = ffmpegSession.duration
+        nominalFrameRate = ffmpegSession.nominalFrameRate
+        scanMetadata = ffmpegSession.scanMetadata
+        colorMetadata = ffmpegSession.colorMetadata
+        preparation = .ffmpegDirect
+    }
+
     func prepared(using preparation: MediaPreparation) -> PreparedPlayerAsset {
-        PreparedPlayerAsset(
+        guard let item, let output else { return self }
+        return PreparedPlayerAsset(
             item: item,
             output: output,
             duration: duration,
@@ -46,17 +64,14 @@ struct PreparedPlayerAsset: Sendable {
 
 enum MediaPreparation: Sendable, Equatable {
     case native
-    case ffmpegRemux
-    case ffmpegTranscode
+    case ffmpegDirect
 
     var notice: String? {
         switch self {
         case .native:
             nil
-        case .ffmpegRemux:
-            "Opened through FFmpeg compatibility mode."
-        case .ffmpegTranscode:
-            "Prepared a compatible playback copy with FFmpeg."
+        case .ffmpegDirect:
+            "Decoding directly with bundled FFmpeg."
         }
     }
 }
@@ -152,28 +167,10 @@ enum AdaptivePlayerAssetLoader {
 
     @MainActor
     private static func loadUsingFFmpeg(url: URL) async throws -> PreparedPlayerAsset {
-        guard let executableURL = FFmpegExecutableLocator.locate() else {
-            throw PlayerLoadError.ffmpegUnavailable
-        }
-
-        let preparer = FFmpegMediaPreparer(executableURL: executableURL)
-
         do {
-            let remuxedURL = try await preparer.prepare(url, mode: .remux)
-            return try await AVURLAssetLoader.load(url: remuxedURL)
-                .prepared(using: .ffmpegRemux)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            // Some Matroska and AVI files contain codecs that QuickTime cannot
-            // decode even after their container is replaced. Convert those to
-            // a predictable VideoToolbox H.264 and AAC compatibility copy.
-        }
-
-        do {
-            let transcodedURL = try await preparer.prepare(url, mode: .transcode)
-            return try await AVURLAssetLoader.load(url: transcodedURL)
-                .prepared(using: .ffmpegTranscode)
+            return try PreparedPlayerAsset(
+                ffmpegSession: FFmpegPlaybackSession(url: url)
+            )
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -185,6 +182,5 @@ enum AdaptivePlayerAssetLoader {
 enum PlayerLoadError: Error {
     case notPlayable
     case noVideoTrack
-    case ffmpegUnavailable
     case ffmpegFailed
 }
