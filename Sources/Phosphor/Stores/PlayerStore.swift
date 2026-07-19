@@ -33,7 +33,7 @@ final class PlayerStore {
     private var directPlaybackSession: FFmpegPlaybackSession?
 
     @ObservationIgnored
-    private var directTimeTimer: Timer?
+    private var directTimeTask: Task<Void, Never>?
 
     @ObservationIgnored
     private var loadGeneration = 0
@@ -56,18 +56,14 @@ final class PlayerStore {
         self.assetLoader = assetLoader
         player.volume = volume
         timeObserver = PlayerTimeObserver(player: player) { [weak self] time in
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 self?.updateTime(time)
             }
         }
-        directTimeTimer = Timer.scheduledTimer(
-            withTimeInterval: 0.1,
-            repeats: true
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.updateDirectPlaybackTime()
-            }
-        }
+    }
+
+    deinit {
+        directTimeTask?.cancel()
     }
 
     @discardableResult
@@ -141,6 +137,7 @@ final class PlayerStore {
 
             directPlaybackSession?.pause()
             directPlaybackSession = prepared.ffmpegSession
+            synchronizeDirectTimeTask()
             player.replaceCurrentItem(with: prepared.item)
             videoOutput = prepared.output
             frameSource = prepared.frameSource
@@ -194,6 +191,24 @@ final class PlayerStore {
         if duration > 0, currentTime >= duration, transport == .playing {
             directPlaybackSession.pause()
             transport = .paused
+        }
+    }
+
+    private func synchronizeDirectTimeTask() {
+        directTimeTask?.cancel()
+        directTimeTask = nil
+        guard directPlaybackSession != nil else { return }
+
+        directTimeTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .milliseconds(100))
+                } catch {
+                    break
+                }
+                guard !Task.isCancelled else { break }
+                self?.updateDirectPlaybackTime()
+            }
         }
     }
 

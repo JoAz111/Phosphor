@@ -5,6 +5,23 @@ import XCTest
 
 @MainActor
 final class PlayerStoreTests: XCTestCase {
+    func testPlaybackClockCallbacksNeverAssumeAnExecutor() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/Phosphor/Stores/PlayerStore.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(
+            source.contains("MainActor.assumeIsolated"),
+            "Timer and AVPlayer callbacks must hop to MainActor instead of assuming an executor"
+        )
+    }
+
     func testEmptyStoreHasDeterministicDefaults() {
         let store = PlayerStore()
 
