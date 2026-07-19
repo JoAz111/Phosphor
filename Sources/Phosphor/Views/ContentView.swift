@@ -50,7 +50,8 @@ struct ContentView: View {
                 presentationTime: store.currentTime,
                 nominalFrameRate: store.nominalFrameRate,
                 scanMetadata: store.scanMetadata,
-                edrPhosphors: controlPreferences.edrPhosphors
+                edrPhosphors: controlPreferences.edrPhosphors,
+                onMouseActivity: revealControls
             )
 
             if !store.hasMedia {
@@ -96,10 +97,6 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
-        .onContinuousHover { phase in
-            guard case .active = phase else { return }
-            revealControls()
-        }
         .dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first else { return false }
             store.load(url: url)

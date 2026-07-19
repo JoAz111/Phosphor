@@ -6,6 +6,24 @@ import UniformTypeIdentifiers
 @MainActor
 @Observable
 final class PlayerStore {
+    @MainActor
+    private final class DirectTimeTarget: NSObject {
+        weak var owner: PlayerStore?
+
+        @objc
+        func timerDidFire(_ timer: Timer) {
+            owner?.updateDirectPlaybackTime()
+        }
+    }
+
+    private final class DirectTimeTimerBox: @unchecked Sendable {
+        var timer: Timer?
+
+        deinit {
+            timer?.invalidate()
+        }
+    }
+
     @ObservationIgnored
     let player: AVPlayer
 
@@ -33,7 +51,10 @@ final class PlayerStore {
     private var directPlaybackSession: FFmpegPlaybackSession?
 
     @ObservationIgnored
-    private var directTimeTask: Task<Void, Never>?
+    private let directTimeTimer = DirectTimeTimerBox()
+
+    @ObservationIgnored
+    private let directTimeTarget: DirectTimeTarget
 
     @ObservationIgnored
     private var loadGeneration = 0
@@ -54,16 +75,14 @@ final class PlayerStore {
     ) {
         self.player = player
         self.assetLoader = assetLoader
+        directTimeTarget = DirectTimeTarget()
+        directTimeTarget.owner = self
         player.volume = volume
         timeObserver = PlayerTimeObserver(player: player) { [weak self] time in
             Task { @MainActor [weak self] in
                 self?.updateTime(time)
             }
         }
-    }
-
-    deinit {
-        directTimeTask?.cancel()
     }
 
     @discardableResult
@@ -137,7 +156,7 @@ final class PlayerStore {
 
             directPlaybackSession?.pause()
             directPlaybackSession = prepared.ffmpegSession
-            synchronizeDirectTimeTask()
+            synchronizeDirectTimeTimer()
             player.replaceCurrentItem(with: prepared.item)
             videoOutput = prepared.output
             frameSource = prepared.frameSource
@@ -194,22 +213,20 @@ final class PlayerStore {
         }
     }
 
-    private func synchronizeDirectTimeTask() {
-        directTimeTask?.cancel()
-        directTimeTask = nil
+    private func synchronizeDirectTimeTimer() {
+        directTimeTimer.timer?.invalidate()
+        directTimeTimer.timer = nil
         guard directPlaybackSession != nil else { return }
 
-        directTimeTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(for: .milliseconds(100))
-                } catch {
-                    break
-                }
-                guard !Task.isCancelled else { break }
-                self?.updateDirectPlaybackTime()
-            }
-        }
+        let timer = Timer(
+            timeInterval: 0.1,
+            target: directTimeTarget,
+            selector: #selector(DirectTimeTarget.timerDidFire(_:)),
+            userInfo: nil,
+            repeats: true
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        directTimeTimer.timer = timer
     }
 
     private static func finiteNonnegative(_ value: TimeInterval) -> TimeInterval {

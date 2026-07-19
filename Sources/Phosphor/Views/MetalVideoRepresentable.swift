@@ -8,6 +8,7 @@ struct MetalVideoRepresentable: NSViewRepresentable {
     let nominalFrameRate: Float
     let scanMetadata: VideoScanMetadata
     let edrPhosphors: Bool
+    let onMouseActivity: () -> Void
 
     func makeNSView(context: Context) -> MetalVideoView {
         let view = MetalVideoView(frame: .zero)
@@ -20,6 +21,7 @@ struct MetalVideoRepresentable: NSViewRepresentable {
             edrPhosphors: edrPhosphors
         )
         view.setActive(active)
+        view.setMouseActivityHandler(onMouseActivity)
         return view
     }
 
@@ -33,12 +35,14 @@ struct MetalVideoRepresentable: NSViewRepresentable {
             edrPhosphors: edrPhosphors
         )
         nsView.setActive(active)
+        nsView.setMouseActivityHandler(onMouseActivity)
     }
 
     static func dismantleNSView(
         _ nsView: MetalVideoView,
         coordinator: Void
     ) {
+        nsView.setMouseActivityHandler(nil)
         nsView.stopPresentation()
     }
 }

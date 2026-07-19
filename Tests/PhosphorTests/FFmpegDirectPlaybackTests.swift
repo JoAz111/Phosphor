@@ -114,6 +114,42 @@ final class FFmpegDirectPlaybackTests: XCTestCase {
         )
     }
 
+    func testPlayerStoreRunsDirectMatroskaClockWithoutExecutorHops() async throws {
+        let executable = URL(fileURLWithPath: "/opt/homebrew/bin/ffmpeg")
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            throw XCTSkip("FFmpeg development runtime is not installed")
+        }
+
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "phosphor-store-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let source = root.appending(path: "source.mkv")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try Self.run(executable, arguments: [
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24",
+            "-t", "1.0", "-c:v", "ffv1", "-an",
+            source.path
+        ])
+        let filesBefore = try Set(FileManager.default.contentsOfDirectory(atPath: root.path))
+        let session = try FFmpegPlaybackSession(url: source)
+        let prepared = PreparedPlayerAsset(ffmpegSession: session)
+        let store = PlayerStore(assetLoader: { _ in prepared })
+
+        await store.load(url: source).value
+        try await Task.sleep(for: .milliseconds(350))
+
+        XCTAssertEqual(store.transport, .playing)
+        XCTAssertGreaterThan(store.currentTime, 0.15)
+        XCTAssertEqual(
+            try Set(FileManager.default.contentsOfDirectory(atPath: root.path)),
+            filesBefore,
+            "Integrated FFmpeg playback must not create prepared media"
+        )
+        store.togglePlayback()
+    }
+
     private static func run(_ executableURL: URL, arguments: [String]) throws {
         let process = Process()
         process.executableURL = executableURL

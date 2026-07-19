@@ -15,6 +15,8 @@ final class MetalVideoView: NSView {
     private var configuredScanMetadata = VideoScanMetadata.progressive
     private var requestsEDRPhosphors = true
     private var displayConfiguration: DisplayConfiguration?
+    private var mouseActivityHandler: (() -> Void)?
+    private var mouseTrackingArea: NSTrackingArea?
 
     private struct DisplayConfiguration: Equatable {
         let usesEDR: Bool
@@ -57,9 +59,29 @@ final class MetalVideoView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
         updateDisplayConfigurationIfNeeded()
         updateDisplayLinkState()
         needsLayout = true
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let mouseTrackingArea {
+            removeTrackingArea(mouseTrackingArea)
+        }
+        let updatedTrackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(updatedTrackingArea)
+        mouseTrackingArea = updatedTrackingArea
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        mouseActivityHandler?()
     }
 
     func configure(
@@ -93,6 +115,10 @@ final class MetalVideoView: NSView {
         updateDisplayLinkState()
     }
 
+    func setMouseActivityHandler(_ handler: (() -> Void)?) {
+        mouseActivityHandler = handler
+    }
+
     private func setUpMetalLayer() {
         wantsLayer = true
         guard let metalLayer = layer as? CAMetalLayer else {
@@ -120,15 +146,27 @@ final class MetalVideoView: NSView {
     }
 
     @objc
-    private func windowScreenDidChange(_ notification: Notification) {
-        guard notification.object as? NSWindow === window else { return }
-        updateDisplayConfigurationIfNeeded()
+    nonisolated private func windowScreenDidChange(_ notification: Notification) {
+        guard let source = notification.object as AnyObject? else { return }
+        let sourceID = ObjectIdentifier(source)
+        Task { @MainActor [weak self] in
+            guard let self,
+                  let window = self.window,
+                  ObjectIdentifier(window) == sourceID else { return }
+            self.updateDisplayConfigurationIfNeeded()
+        }
     }
 
     @objc
-    private func windowOcclusionDidChange(_ notification: Notification) {
-        guard notification.object as? NSWindow === window else { return }
-        updateDisplayLinkState()
+    nonisolated private func windowOcclusionDidChange(_ notification: Notification) {
+        guard let source = notification.object as AnyObject? else { return }
+        let sourceID = ObjectIdentifier(source)
+        Task { @MainActor [weak self] in
+            guard let self,
+                  let window = self.window,
+                  ObjectIdentifier(window) == sourceID else { return }
+            self.updateDisplayLinkState()
+        }
     }
 
     /// Stops display-rate CRT work when SwiftUI dismantles this presentation.
