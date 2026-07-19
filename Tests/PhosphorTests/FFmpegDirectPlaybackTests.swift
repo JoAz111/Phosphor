@@ -114,6 +114,42 @@ final class FFmpegDirectPlaybackTests: XCTestCase {
         )
     }
 
+    func testDirectAudioOutputUsesStandardDeinterleavedFloatLayout() {
+        let format = FFmpegAudioOutput.playbackFormat
+
+        XCTAssertEqual(format.commonFormat, .pcmFormatFloat32)
+        XCTAssertEqual(format.sampleRate, 48_000)
+        XCTAssertEqual(format.channelCount, 2)
+        XCTAssertFalse(format.isInterleaved)
+    }
+
+    func testDirectAVIAudioConnectsWithoutThrowingAnObjectiveCException() async throws {
+        let executable = URL(fileURLWithPath: "/opt/homebrew/bin/ffmpeg")
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            throw XCTSkip("FFmpeg development runtime is not installed")
+        }
+
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "phosphor-avi-audio-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let source = root.appending(path: "source.avi")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try Self.run(executable, arguments: [
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+            "-t", "0.5", "-shortest",
+            "-c:v", "mpeg4", "-c:a", "mp3",
+            source.path
+        ])
+
+        let session = try FFmpegPlaybackSession(url: source)
+        session.play()
+        try await Task.sleep(for: .milliseconds(200))
+        session.pause()
+    }
+
     func testPlayerStoreRunsDirectMatroskaClockWithoutExecutorHops() async throws {
         let executable = URL(fileURLWithPath: "/opt/homebrew/bin/ffmpeg")
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {

@@ -175,6 +175,11 @@ final class FFmpegVideoFrameSource: VideoFrameSource, @unchecked Sendable {
 }
 
 final class FFmpegAudioOutput: @unchecked Sendable {
+    static let playbackFormat = AVAudioFormat(
+        standardFormatWithSampleRate: 48_000,
+        channels: 2
+    )!
+
     private let condition = NSCondition()
     private let decodeQueue = DispatchQueue(
         label: "com.joeyazizoff.Phosphor.FFmpegAudio",
@@ -182,12 +187,7 @@ final class FFmpegAudioOutput: @unchecked Sendable {
     )
     private let engine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
-    private let format = AVAudioFormat(
-        commonFormat: .pcmFormatFloat32,
-        sampleRate: 48_000,
-        channels: 2,
-        interleaved: true
-    )!
+    private let format = playbackFormat
     private var decoder: OpaquePointer?
     private var playing = false
     private var isClosed = false
@@ -302,10 +302,15 @@ final class FFmpegAudioOutput: @unchecked Sendable {
                 continue
             }
             buffer.frameLength = AVAudioFrameCount(frameCount)
-            let byteCount = Int(frameCount) * 2 * MemoryLayout<Float>.size
-            if let destination = buffer.mutableAudioBufferList.pointee.mBuffers.mData {
-                samples.withUnsafeBytes { bytes in
-                    destination.copyMemory(from: bytes.baseAddress!, byteCount: byteCount)
+            guard let channelData = buffer.floatChannelData else {
+                continue
+            }
+            let left = channelData[0]
+            let right = channelData[1]
+            samples.withUnsafeBufferPointer { source in
+                for frame in 0 ..< Int(frameCount) {
+                    left[frame] = source[frame * 2]
+                    right[frame] = source[frame * 2 + 1]
                 }
             }
 
