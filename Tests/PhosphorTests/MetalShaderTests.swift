@@ -24,15 +24,34 @@ final class MetalShaderTests: XCTestCase {
         for entryPoint in expectedEntryPoints {
             let descriptor = MTLRenderPipelineDescriptor()
             descriptor.vertexFunction = vertex
-            descriptor.fragmentFunction = try XCTUnwrap(
-                library.makeFunction(name: entryPoint.name)
+            descriptor.fragmentFunction = try fragmentFunction(
+                named: entryPoint.name,
+                library: library,
+                usesSlotMask: entryPoint.name == "guestPhosphorMaskFragment"
+                    ? false
+                    : nil
             )
-            descriptor.colorAttachments[0].pixelFormat = entryPoint.pixelFormat
+            for (index, pixelFormat) in entryPoint.pixelFormats.enumerated() {
+                descriptor.colorAttachments[index].pixelFormat = pixelFormat
+            }
             XCTAssertNoThrow(
                 try device.makeRenderPipelineState(descriptor: descriptor),
                 entryPoint.name
             )
         }
+
+        let slotDescriptor = MTLRenderPipelineDescriptor()
+        slotDescriptor.vertexFunction = vertex
+        slotDescriptor.fragmentFunction = try fragmentFunction(
+            named: "guestPhosphorMaskFragment",
+            library: library,
+            usesSlotMask: true
+        )
+        slotDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        XCTAssertNoThrow(
+            try device.makeRenderPipelineState(descriptor: slotDescriptor),
+            "guestPhosphorMaskFragment slot-mask specialization"
+        )
     }
 
     func testBypassPreservesRawFittedCorner() throws {
@@ -137,7 +156,7 @@ final class MetalShaderTests: XCTestCase {
 
     func testFinalMaskCreatesSeparateRGBPhosphorsInPhysicalPixels() throws {
         let size = 12
-        let beam = try makeSolidFloatTexture(
+        let sharpened = try makeSolidFloatTexture(
             width: size,
             height: size,
             color: SIMD4<Float>(0.25, 0.25, 0.25, 0.20)
@@ -151,7 +170,7 @@ final class MetalShaderTests: XCTestCase {
             function: "guestPhosphorMaskFragment",
             outputSize: SIMD2(size, size),
             outputFormat: .bgra8Unorm_srgb,
-            textures: [beam, black, black, black, black, black],
+            textures: [sharpened, black, black, black, black],
             settings: ShaderSettings(
                 intensity: 1,
                 curvature: 0,
@@ -173,7 +192,7 @@ final class MetalShaderTests: XCTestCase {
 
     func testSlotMaskStaggersSeparatorsAcrossAlternatingTriads() throws {
         let size = 12
-        let beam = try makeSolidFloatTexture(
+        let sharpened = try makeSolidFloatTexture(
             width: size,
             height: size,
             color: SIMD4<Float>(0.25, 0.25, 0.25, 0.20)
@@ -187,7 +206,7 @@ final class MetalShaderTests: XCTestCase {
             function: "guestPhosphorMaskFragment",
             outputSize: SIMD2(size, size),
             outputFormat: .bgra8Unorm_srgb,
-            textures: [beam, black, black, black, black, black],
+            textures: [sharpened, black, black, black, black],
             settings: ShaderSettings(
                 intensity: 1,
                 curvature: 0,
@@ -210,7 +229,7 @@ final class MetalShaderTests: XCTestCase {
 
     func testTubeGlowAddsNeutralBloomAndWarmHalation() throws {
         let size = 12
-        let beam = try makeSolidFloatTexture(
+        let sharpened = try makeSolidFloatTexture(
             width: size,
             height: size,
             color: SIMD4<Float>(0, 0, 0, 0)
@@ -230,7 +249,7 @@ final class MetalShaderTests: XCTestCase {
             function: "guestPhosphorMaskFragment",
             outputSize: SIMD2(size, size),
             outputFormat: .bgra8Unorm_srgb,
-            textures: [beam, black, bloom, black, black, black],
+            textures: [sharpened, bloom, black, black, black],
             settings: ShaderSettings(
                 intensity: 1,
                 curvature: 0,
@@ -244,7 +263,7 @@ final class MetalShaderTests: XCTestCase {
             function: "guestPhosphorMaskFragment",
             outputSize: SIMD2(size, size),
             outputFormat: .bgra8Unorm_srgb,
-            textures: [beam, black, bloom, black, black, black],
+            textures: [sharpened, bloom, black, black, black],
             settings: ShaderSettings(
                 intensity: 1,
                 curvature: 0,
@@ -285,22 +304,31 @@ final class MetalShaderTests: XCTestCase {
         )
     }
 
-    private var expectedEntryPoints: [(name: String, pixelFormat: MTLPixelFormat)] {
+    private var expectedEntryPoints: [(name: String, pixelFormats: [MTLPixelFormat])] {
         [
-            ("phosphorBypassFragmentNV12", .bgra8Unorm_srgb),
-            ("phosphorBypassFragmentBGRA", .bgra8Unorm_srgb),
-            ("phosphorDecodeFragmentNV12", .rgba16Float),
-            ("phosphorDecodeFragmentBGRA", .rgba16Float),
-            ("guestAfterglowFragment", .rgba16Float),
-            ("guestPrepassFragment", .rgba16Float),
-            ("guestLinearizeFragment", .rgba16Float),
-            ("guestHDSharpenFragment", .rgba16Float),
-            ("guestGlowHorizontalFragment", .rgba16Float),
-            ("guestGlowVerticalFragment", .rgba16Float),
-            ("guestBloomHorizontalFragment", .rgba16Float),
-            ("guestBloomVerticalFragment", .rgba16Float),
-            ("guestHDBeamFragment", .rgba16Float),
-            ("guestPhosphorMaskFragment", .bgra8Unorm_srgb)
+            ("phosphorBypassFragmentNV12", [.bgra8Unorm_srgb]),
+            ("phosphorBypassFragmentBGRA", [.bgra8Unorm_srgb]),
+            ("phosphorDecodeFragmentNV12", [.rgba16Float]),
+            ("phosphorDecodeFragmentBGRA", [.rgba16Float]),
+            (
+                "guestPrepareFrameNV12Fragment",
+                [.rgba16Float, .rgba16Float, .rgba16Float]
+            ),
+            (
+                "guestPrepareFrameBGRAFragment",
+                [.rgba16Float, .rgba16Float, .rgba16Float]
+            ),
+            ("guestAfterglowFragment", [.rgba16Float]),
+            ("guestPrepassFragment", [.rgba16Float]),
+            ("guestPrepassLinearizedFragment", [.rgba16Float]),
+            ("guestLinearizeFragment", [.rgba16Float]),
+            ("guestHDSharpenFragment", [.rgba16Float]),
+            ("guestGlowHorizontalFragment", [.rgba16Float]),
+            ("guestGlowVerticalFragment", [.rgba16Float]),
+            ("guestBloomHorizontalFragment", [.rgba16Float]),
+            ("guestBloomVerticalFragment", [.rgba16Float]),
+            ("guestHDBeamFragment", [.rgba16Float]),
+            ("guestPhosphorMaskFragment", [.bgra8Unorm_srgb])
         ]
     }
 
@@ -321,7 +349,13 @@ final class MetalShaderTests: XCTestCase {
         descriptor.vertexFunction = try XCTUnwrap(
             library.makeFunction(name: "phosphorFullscreenVertex")
         )
-        descriptor.fragmentFunction = try XCTUnwrap(library.makeFunction(name: function))
+        descriptor.fragmentFunction = try fragmentFunction(
+            named: function,
+            library: library,
+            usesSlotMask: function == "guestPhosphorMaskFragment"
+                ? settings.maskPattern == .slotMask
+                : nil
+        )
         descriptor.colorAttachments[0].pixelFormat = outputFormat
         let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
 
@@ -380,6 +414,28 @@ final class MetalShaderTests: XCTestCase {
             )
         }
         return pixels
+    }
+
+    private func fragmentFunction(
+        named name: String,
+        library: any MTLLibrary,
+        usesSlotMask: Bool?
+    ) throws -> any MTLFunction {
+        guard let usesSlotMask else {
+            return try XCTUnwrap(library.makeFunction(name: name))
+        }
+
+        let constants = MTLFunctionConstantValues()
+        var specializedSlotMask = usesSlotMask
+        constants.setConstantValue(
+            &specializedSlotMask,
+            type: .bool,
+            index: 0
+        )
+        return try library.makeFunction(
+            name: name,
+            constantValues: constants
+        )
     }
 
     private func makeSolidTexture(

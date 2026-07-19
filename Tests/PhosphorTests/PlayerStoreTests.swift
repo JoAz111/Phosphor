@@ -12,6 +12,7 @@ final class PlayerStoreTests: XCTestCase {
         XCTAssertEqual(store.transport, .empty)
         XCTAssertEqual(store.currentTime, 0)
         XCTAssertEqual(store.duration, 0)
+        XCTAssertEqual(store.nominalFrameRate, 0)
         XCTAssertEqual(store.volume, 1)
         XCTAssertNil(store.videoOutput)
         XCTAssertNil(store.currentURL)
@@ -96,7 +97,10 @@ final class PlayerStoreTests: XCTestCase {
         let firstURL = Self.url("first")
         let secondURL = Self.url("second")
         let firstPrepared = makePreparedPlayerAsset(duration: 10)
-        let secondPrepared = makePreparedPlayerAsset(duration: 20)
+        let secondPrepared = makePreparedPlayerAsset(
+            duration: 20,
+            nominalFrameRate: 29.97
+        )
         let store = PlayerStore(assetLoader: { url in
             try await loader.load(url: url)
         })
@@ -114,6 +118,7 @@ final class PlayerStoreTests: XCTestCase {
         XCTAssertTrue(store.player.currentItem === secondPrepared.item)
         XCTAssertTrue(store.videoOutput === secondPrepared.output)
         XCTAssertEqual(store.duration, 20)
+        XCTAssertEqual(store.nominalFrameRate, 29.97, accuracy: 0.001)
         XCTAssertNil(store.errorMessage)
     }
 
@@ -150,6 +155,14 @@ final class PlayerStoreTests: XCTestCase {
         XCTAssertEqual(
             attributes[kCVPixelBufferMetalCompatibilityKey as String] as? Bool,
             true
+        )
+        XCTAssertNotNil(
+            attributes[kCVPixelBufferIOSurfacePropertiesKey as String]
+        )
+        XCTAssertTrue(
+            AVURLAssetLoader.videoOutputConfiguration
+                .makeVideoOutput()
+                .suppressesPlayerRendering
         )
     }
 
@@ -264,6 +277,7 @@ private final class ControlledPlayerAssetLoader {
 @MainActor
 private func makePreparedPlayerAsset(
     duration: TimeInterval,
+    nominalFrameRate: Float = 0,
     metadata: VideoColorMetadata = VideoColorMetadata(mediaCharacteristics: []),
     preparation: MediaPreparation = .native
 ) -> PreparedPlayerAsset {
@@ -274,6 +288,7 @@ private func makePreparedPlayerAsset(
         item: item,
         output: output,
         duration: duration,
+        nominalFrameRate: nominalFrameRate,
         colorMetadata: metadata,
         preparation: preparation
     )

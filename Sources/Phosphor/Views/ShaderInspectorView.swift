@@ -44,6 +44,9 @@ struct ShaderInspectorView: View {
                 value: $preferences.vignette,
                 range: 0 ... 1
             )
+            Toggle("EDR Phosphors", isOn: $preferences.edrPhosphors)
+                .font(.caption)
+                .help("Use extended display brightness for luminous phosphors when supported")
         }
         .padding(16)
         .frame(width: 280)

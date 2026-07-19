@@ -8,6 +8,21 @@ import QuartzCore
 final class MetalVideoView: NSView {
     private var renderer: MetalRenderer?
     private var requestedActive = false
+    private var configuredOutput: AVPlayerItemVideoOutput?
+    private var configuredSettings = ShaderSettings.default
+    private var configuredPresentationTime: TimeInterval = 0
+    private var configuredNominalFrameRate: Float = 0
+    private var requestsEDRPhosphors = true
+    private var displayConfiguration: DisplayConfiguration?
+
+    private struct DisplayConfiguration: Equatable {
+        let usesEDR: Bool
+        let headroom: Float
+
+        var pixelFormat: MTLPixelFormat {
+            usesEDR ? .rgba16Float : .bgra8Unorm_srgb
+        }
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -17,6 +32,10 @@ final class MetalVideoView: NSView {
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         setUpMetalLayer()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     override func makeBackingLayer() -> CALayer {
@@ -30,11 +49,13 @@ final class MetalVideoView: NSView {
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
+        updateDisplayConfigurationIfNeeded()
         updateDrawableSize()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        updateDisplayConfigurationIfNeeded()
         updateDisplayLinkState()
         needsLayout = true
     }
@@ -42,9 +63,22 @@ final class MetalVideoView: NSView {
     func configure(
         output: AVPlayerItemVideoOutput?,
         settings: ShaderSettings,
-        presentationTime: TimeInterval
+        presentationTime: TimeInterval,
+        nominalFrameRate: Float,
+        edrPhosphors: Bool
     ) {
-        renderer?.configure(output: output, settings: settings)
+        configuredOutput = output
+        configuredSettings = settings
+        configuredPresentationTime = presentationTime
+        configuredNominalFrameRate = nominalFrameRate
+        requestsEDRPhosphors = edrPhosphors
+        updateDisplayConfigurationIfNeeded()
+        renderer?.configure(
+            output: output,
+            settings: settings,
+            edrHeadroom: displayConfiguration?.headroom ?? 1,
+            nominalFrameRate: nominalFrameRate
+        )
         renderer?.requestPresentation(at: presentationTime)
     }
 
@@ -61,12 +95,61 @@ final class MetalVideoView: NSView {
 
         metalLayer.isOpaque = true
         metalLayer.backgroundColor = NSColor.black.cgColor
-        metalLayer.pixelFormat = .bgra8Unorm_srgb
-        metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         metalLayer.framebufferOnly = true
         metalLayer.maximumDrawableCount = 3
-        renderer = try? MetalRenderer(layer: metalLayer)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowScreenDidChange(_:)),
+            name: NSWindow.didChangeScreenNotification,
+            object: nil
+        )
+        updateDisplayConfigurationIfNeeded()
         updateDrawableSize()
+    }
+
+    @objc
+    private func windowScreenDidChange(_ notification: Notification) {
+        guard notification.object as? NSWindow === window else { return }
+        updateDisplayConfigurationIfNeeded()
+    }
+
+    private func updateDisplayConfigurationIfNeeded() {
+        guard let metalLayer = layer as? CAMetalLayer else { return }
+
+        let potentialHeadroom = Float(
+            window?.screen?.maximumPotentialExtendedDynamicRangeColorComponentValue
+                ?? 1
+        )
+        let usesEDR = requestsEDRPhosphors && potentialHeadroom > 1
+        let updatedConfiguration = DisplayConfiguration(
+            usesEDR: usesEDR,
+            headroom: usesEDR ? min(max(potentialHeadroom, 1), 2) : 1
+        )
+        guard displayConfiguration != updatedConfiguration else { return }
+
+        renderer?.setActive(false)
+        renderer = nil
+        displayConfiguration = updatedConfiguration
+
+        metalLayer.pixelFormat = updatedConfiguration.pixelFormat
+        metalLayer.colorspace = CGColorSpace(
+            name: usesEDR
+                ? CGColorSpace.extendedLinearSRGB
+                : CGColorSpace.sRGB
+        )
+        metalLayer.wantsExtendedDynamicRangeContent = usesEDR
+        metalLayer.edrMetadata = nil
+
+        renderer = try? MetalRenderer(layer: metalLayer)
+        renderer?.configure(
+            output: configuredOutput,
+            settings: configuredSettings,
+            edrHeadroom: updatedConfiguration.headroom,
+            nominalFrameRate: configuredNominalFrameRate
+        )
+        renderer?.requestPresentation(at: configuredPresentationTime)
+        updateDrawableSize()
+        updateDisplayLinkState()
     }
 
     private func updateDrawableSize() {

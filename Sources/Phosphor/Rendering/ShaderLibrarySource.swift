@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 
 enum ShaderLibrarySource {
     enum Error: Swift.Error {
@@ -14,5 +15,18 @@ enum ShaderLibrarySource {
         }
 
         return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    static func makeLibrary(
+        device: any MTLDevice
+    ) throws -> any MTLLibrary {
+        if let precompiledURL = Bundle.module.url(
+            forResource: "PhosphorShaders",
+            withExtension: "metallib"
+        ) {
+            return try device.makeLibrary(URL: precompiledURL)
+        }
+
+        return try device.makeLibrary(source: load(), options: nil)
     }
 }

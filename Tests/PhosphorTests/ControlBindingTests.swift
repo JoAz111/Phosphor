@@ -32,6 +32,7 @@ final class ControlBindingTests: XCTestCase {
                 vignette: 2
             )
         )
+        XCTAssertTrue(preferences.edrPhosphors)
     }
 
     func testBypassUsesZeroIntensityWithoutErasingSavedIntensity() {
@@ -57,7 +58,8 @@ final class ControlBindingTests: XCTestCase {
             mask: 0.4,
             maskPattern: .slotMask,
             glow: 0.5,
-            vignette: 0.6
+            vignette: 0.6,
+            edrPhosphors: false
         )
 
         preferences.reset()

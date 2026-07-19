@@ -15,6 +15,7 @@ final class PlayerStore {
     private(set) var transport: PlayerTransport = .empty
     private(set) var currentTime: TimeInterval = 0
     private(set) var duration: TimeInterval = 0
+    private(set) var nominalFrameRate: Float = 0
     private(set) var volume: Float = 1
     private(set) var currentURL: URL?
     private(set) var errorMessage: String?
@@ -115,6 +116,7 @@ final class PlayerStore {
             currentURL = url
             currentTime = 0
             duration = Self.finiteNonnegative(prepared.duration)
+            nominalFrameRate = Self.finiteNonnegative(prepared.nominalFrameRate)
             errorMessage = nil
             noticeMessage = prepared.colorMetadata.sdrPathNotice
             if let preparationNotice = prepared.preparation.notice {
@@ -150,6 +152,10 @@ final class PlayerStore {
     }
 
     private static func finiteNonnegative(_ value: TimeInterval) -> TimeInterval {
+        value.isFinite ? max(value, 0) : 0
+    }
+
+    private static func finiteNonnegative(_ value: Float) -> Float {
         value.isFinite ? max(value, 0) : 0
     }
 

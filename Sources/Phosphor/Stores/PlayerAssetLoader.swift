@@ -8,14 +8,32 @@ struct PreparedPlayerAsset: Sendable {
     let item: AVPlayerItem
     let output: AVPlayerItemVideoOutput
     let duration: TimeInterval
+    let nominalFrameRate: Float
     let colorMetadata: VideoColorMetadata
     let preparation: MediaPreparation
+
+    init(
+        item: AVPlayerItem,
+        output: AVPlayerItemVideoOutput,
+        duration: TimeInterval,
+        nominalFrameRate: Float = 0,
+        colorMetadata: VideoColorMetadata,
+        preparation: MediaPreparation
+    ) {
+        self.item = item
+        self.output = output
+        self.duration = duration
+        self.nominalFrameRate = nominalFrameRate
+        self.colorMetadata = colorMetadata
+        self.preparation = preparation
+    }
 
     func prepared(using preparation: MediaPreparation) -> PreparedPlayerAsset {
         PreparedPlayerAsset(
             item: item,
             output: output,
             duration: duration,
+            nominalFrameRate: nominalFrameRate,
             colorMetadata: colorMetadata,
             preparation: preparation
         )
@@ -51,12 +69,17 @@ struct VideoOutputConfiguration: Equatable, Sendable {
     var pixelBufferAttributes: [String: any Sendable] {
         [
             kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
-            kCVPixelBufferMetalCompatibilityKey as String: isMetalCompatible
+            kCVPixelBufferMetalCompatibilityKey as String: isMetalCompatible,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [String: String]()
         ]
     }
 
     func makeVideoOutput() -> AVPlayerItemVideoOutput {
-        AVPlayerItemVideoOutput(pixelBufferAttributes: pixelBufferAttributes)
+        let output = AVPlayerItemVideoOutput(
+            pixelBufferAttributes: pixelBufferAttributes
+        )
+        output.suppressesPlayerRendering = true
+        return output
     }
 }
 
@@ -86,6 +109,7 @@ enum AVURLAssetLoader {
         for track in tracks {
             characteristics.formUnion(try await track.load(.mediaCharacteristics))
         }
+        let nominalFrameRate = (try? await tracks[0].load(.nominalFrameRate)) ?? 0
 
         let output = videoOutputConfiguration.makeVideoOutput()
         let item = AVPlayerItem(asset: asset)
@@ -95,6 +119,7 @@ enum AVURLAssetLoader {
             item: item,
             output: output,
             duration: loadedDuration.seconds,
+            nominalFrameRate: nominalFrameRate,
             colorMetadata: VideoColorMetadata(
                 mediaCharacteristics: characteristics
             ),

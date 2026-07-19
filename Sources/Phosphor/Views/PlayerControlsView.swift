@@ -14,6 +14,7 @@ struct ControlPreferences: Equatable {
     var maskPattern: PhosphorMaskPattern
     var glow: Double
     var vignette: Double
+    var edrPhosphors: Bool
 
     static let `default` = ControlPreferences()
 
@@ -37,7 +38,8 @@ struct ControlPreferences: Equatable {
         mask: Double = Double(ShaderSettings.default.mask),
         maskPattern: PhosphorMaskPattern = ShaderSettings.default.maskPattern,
         glow: Double = Double(ShaderSettings.default.glow),
-        vignette: Double = Double(ShaderSettings.default.vignette)
+        vignette: Double = Double(ShaderSettings.default.vignette),
+        edrPhosphors: Bool = true
     ) {
         self.isBypassed = isBypassed
         self.savedIntensity = savedIntensity
@@ -47,6 +49,7 @@ struct ControlPreferences: Equatable {
         self.maskPattern = maskPattern
         self.glow = glow
         self.vignette = vignette
+        self.edrPhosphors = edrPhosphors
     }
 
     mutating func reset() {

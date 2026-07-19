@@ -19,6 +19,8 @@ struct ContentView: View {
     private var glow = ControlPreferences.default.glow
     @AppStorage("phosphor.shader.vignette")
     private var vignette = ControlPreferences.default.vignette
+    @AppStorage("phosphor.display.edrPhosphors")
+    private var edrPhosphors = ControlPreferences.default.edrPhosphors
 
     @State private var controlsAreVisible = true
     @State private var activityToken = 0
@@ -33,7 +35,9 @@ struct ContentView: View {
                 output: store.videoOutput,
                 settings: controlPreferences.shaderSettings,
                 active: store.transport == .playing,
-                presentationTime: store.currentTime
+                presentationTime: store.currentTime,
+                nominalFrameRate: store.nominalFrameRate,
+                edrPhosphors: controlPreferences.edrPhosphors
             )
 
             if !store.hasMedia {
@@ -151,7 +155,8 @@ struct ContentView: View {
             maskPattern: PhosphorMaskPattern(rawValue: maskPatternRawValue)
                 ?? .apertureGrille,
             glow: glow,
-            vignette: vignette
+            vignette: vignette,
+            edrPhosphors: edrPhosphors
         )
     }
 
@@ -167,6 +172,7 @@ struct ContentView: View {
                 maskPatternRawValue = preferences.maskPattern.rawValue
                 glow = preferences.glow
                 vignette = preferences.vignette
+                edrPhosphors = preferences.edrPhosphors
             }
         )
     }

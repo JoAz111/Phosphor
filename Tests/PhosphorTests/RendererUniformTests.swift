@@ -2,6 +2,26 @@ import XCTest
 @testable import Phosphor
 
 final class RendererUniformTests: XCTestCase {
+    func testGPUClockSpanConversionProducesMilliseconds() {
+        XCTAssertEqual(
+            MetalFrameDiagnostics.milliseconds(
+                gpuDelta: 250,
+                gpuClockSpan: 1_000,
+                cpuClockSpan: 8_000_000
+            ),
+            2,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            MetalFrameDiagnostics.milliseconds(
+                gpuDelta: 1,
+                gpuClockSpan: 0,
+                cpuClockSpan: 1
+            ),
+            0
+        )
+    }
+
     func testRendererSkipsDuplicateFramesUnlessPresentationIsDirty() {
         XCTAssertFalse(MetalRenderer.shouldRender(
             hasNewPixelBuffer: false,
@@ -23,6 +43,26 @@ final class RendererUniformTests: XCTestCase {
             needsRedraw: true,
             hasLastPixelBuffer: false
         ))
+    }
+
+    func testDisplayCadenceTracksVideoAndFallsBackToSixtyHertz() throws {
+        let film = MetalRenderer.preferredFrameRateRange(
+            nominalFrameRate: 23.976
+        )
+        XCTAssertEqual(film.minimum, 23.976, accuracy: 0.001)
+        XCTAssertEqual(film.maximum, 60)
+        XCTAssertEqual(
+            try XCTUnwrap(film.preferred),
+            23.976,
+            accuracy: 0.001
+        )
+
+        let fallback = MetalRenderer.preferredFrameRateRange(
+            nominalFrameRate: .nan
+        )
+        XCTAssertEqual(fallback.minimum, 24)
+        XCTAssertEqual(fallback.maximum, 60)
+        XCTAssertEqual(try XCTUnwrap(fallback.preferred), 60)
     }
 
     func testTemporalHistoryAdvancesOnlyForVideoFramesOrInitialization() {
@@ -110,6 +150,31 @@ final class RendererUniformTests: XCTestCase {
         XCTAssertEqual(uniforms.guestColor, SIMD4(1.80, 1.75, 0.20, 0.50))
         XCTAssertEqual(uniforms.guestScan, SIMD4(0.60, 0.75, 1.0, 2.40))
         XCTAssertEqual(uniforms.guestMask, SIMD4(6.0, 1.10, 2.40, 1.0))
+        XCTAssertEqual(uniforms.frameData.z, 1)
+    }
+
+    func testEDRHeadroomIsClampedWithoutChangingUniformLayout() {
+        let conversion = YUVConversion.make(matrix: .bt709, range: .video)
+
+        let edr = ShaderUniforms(
+            drawableSize: SIMD2(1, 1),
+            sourceSize: SIMD2(1, 1),
+            rasterSize: SIMD2(1, 1),
+            settings: .default,
+            yuvConversion: conversion,
+            edrHeadroom: 8
+        )
+        let invalid = ShaderUniforms(
+            drawableSize: SIMD2(1, 1),
+            sourceSize: SIMD2(1, 1),
+            rasterSize: SIMD2(1, 1),
+            settings: .default,
+            yuvConversion: conversion,
+            edrHeadroom: .nan
+        )
+
+        XCTAssertEqual(edr.frameData.z, 2)
+        XCTAssertEqual(invalid.frameData.z, 1)
     }
 
     func testBT601RowsMapIntoUniformFields() {

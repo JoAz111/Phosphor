@@ -28,19 +28,28 @@ fi
 if [[ -d /Applications/Xcode-beta.app/Contents/Developer ]]; then
   export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
 fi
+export COPYFILE_DISABLE=1
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_BASE="${TMPDIR:-/tmp}"
 SWIFTPM_SCRATCH_DIR="${TMP_BASE%/}/phosphor-swiftpm-build"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
-APP_CONTENTS="$APP_BUNDLE/Contents"
+STAGING_DIR="$SWIFTPM_SCRATCH_DIR/app-staging"
+STAGED_APP_BUNDLE="$STAGING_DIR/$APP_NAME.app"
+APP_CONTENTS="$STAGED_APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 
 cd "$ROOT_DIR"
+
+if ! /usr/bin/xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+  echo "error: Xcode's Metal compiler component is not installed." >&2
+  echo "install it with: xcodebuild -downloadComponent MetalToolchain" >&2
+  exit 1
+fi
 
 /usr/bin/pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 for _ in {1..20}; do
@@ -66,6 +75,9 @@ BUILD_BINARY="$BUILD_BIN_DIR/$APP_NAME"
 BUILD_RESOURCE_BUNDLE="$BUILD_BIN_DIR/Phosphor_Phosphor.bundle"
 BUILD_ICON="$BUILD_RESOURCE_BUNDLE/Contents/Resources/Phosphor.icns"
 PROJECT_LICENSE="$ROOT_DIR/LICENSE"
+METAL_SOURCE="$ROOT_DIR/Sources/Phosphor/Resources/PhosphorShaders.metal"
+METAL_AIR="$SWIFTPM_SCRATCH_DIR/PhosphorShaders.air"
+METAL_LIBRARY="$APP_RESOURCES/Phosphor_Phosphor.bundle/Contents/Resources/PhosphorShaders.metallib"
 
 for required_path in "$BUILD_BINARY" "$BUILD_RESOURCE_BUNDLE" "$BUILD_ICON" "$PROJECT_LICENSE"; do
   if [[ ! -e "$required_path" ]]; then
@@ -74,13 +86,20 @@ for required_path in "$BUILD_BINARY" "$BUILD_RESOURCE_BUNDLE" "$BUILD_ICON" "$PR
   fi
 done
 
-/bin/rm -rf "$APP_BUNDLE"
+/bin/rm -rf "$STAGED_APP_BUNDLE"
 /bin/mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 /bin/cp "$BUILD_BINARY" "$APP_BINARY"
 /bin/chmod +x "$APP_BINARY"
 /bin/cp -R "$BUILD_RESOURCE_BUNDLE" "$APP_RESOURCES/"
 /bin/cp "$BUILD_ICON" "$APP_RESOURCES/Phosphor.icns"
 /bin/cp "$PROJECT_LICENSE" "$APP_RESOURCES/COPYING"
+
+/usr/bin/xcrun -sdk macosx metal \
+  -c "$METAL_SOURCE" \
+  -o "$METAL_AIR"
+/usr/bin/xcrun -sdk macosx metallib \
+  "$METAL_AIR" \
+  -o "$METAL_LIBRARY"
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -140,10 +159,15 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
-/usr/bin/xattr -cr "$APP_BUNDLE"
-/usr/bin/codesign --force --sign - "$APP_BINARY"
-/usr/bin/codesign --force --sign - "$APP_BUNDLE"
-/usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
+/usr/bin/xattr -cr "$STAGED_APP_BUNDLE"
+/usr/bin/codesign --force --sign - "$STAGED_APP_BUNDLE"
+/usr/bin/codesign --verify --deep --strict "$STAGED_APP_BUNDLE"
+
+/bin/mkdir -p "$DIST_DIR"
+/bin/rm -rf "$APP_BUNDLE"
+# Sign before copying into a File Provider-backed workspace. File Provider can
+# attach Finder metadata after the copy even though the sealed files are intact.
+/usr/bin/ditto --norsrc --noextattr "$STAGED_APP_BUNDLE" "$APP_BUNDLE"
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"

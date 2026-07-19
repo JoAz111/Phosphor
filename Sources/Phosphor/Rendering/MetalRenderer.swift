@@ -28,7 +28,8 @@ struct ShaderUniforms {
         settings: ShaderSettings,
         yuvConversion: YUVConversion,
         frameCount: UInt64 = 0,
-        historyIsValid: Bool = false
+        historyIsValid: Bool = false,
+        edrHeadroom: Float = 1
     ) {
         self.drawableSize = Self.sizeVector(drawableSize)
         self.sourceSize = Self.sizeVector(sourceSize)
@@ -64,7 +65,7 @@ struct ShaderUniforms {
         frameData = SIMD4(
             Float(frameCount % 16_777_216),
             historyIsValid ? 1 : 0,
-            0,
+            edrHeadroom.isFinite ? min(max(edrHeadroom, 1), 2) : 1,
             0
         )
     }
@@ -92,22 +93,21 @@ final class MetalRenderer: NSObject {
     private let commandQueue: any MTLCommandQueue
     private let textureCache: CVMetalTextureCache
     private let displayLink: CAMetalDisplayLink
+    private let diagnostics: MetalFrameDiagnostics?
     private let inFlightSemaphore = DispatchSemaphore(value: 1)
 
     private let bypassNV12Pipeline: any MTLRenderPipelineState
     private let bypassBGRAPipeline: any MTLRenderPipelineState
-    private let decodeNV12Pipeline: any MTLRenderPipelineState
-    private let decodeBGRAPipeline: any MTLRenderPipelineState
-    private let afterglowPipeline: any MTLRenderPipelineState
-    private let prepassPipeline: any MTLRenderPipelineState
-    private let linearizePipeline: any MTLRenderPipelineState
+    private let prepareNV12Pipeline: any MTLRenderPipelineState
+    private let prepareBGRAPipeline: any MTLRenderPipelineState
+    private let prepassLinearizedPipeline: any MTLRenderPipelineState
     private let sharpenPipeline: any MTLRenderPipelineState
     private let glowHorizontalPipeline: any MTLRenderPipelineState
     private let glowVerticalPipeline: any MTLRenderPipelineState
     private let bloomHorizontalPipeline: any MTLRenderPipelineState
     private let bloomVerticalPipeline: any MTLRenderPipelineState
-    private let beamPipeline: any MTLRenderPipelineState
-    private let phosphorMaskPipeline: any MTLRenderPipelineState
+    private let apertureMaskPipeline: any MTLRenderPipelineState
+    private let slotMaskPipeline: any MTLRenderPipelineState
 
     private var output: AVPlayerItemVideoOutput?
     private var settings = ShaderSettings.default
@@ -115,6 +115,7 @@ final class MetalRenderer: NSObject {
     private var drawableSize = SIMD2<Float>.zero
     private var renderTargets: GuestRenderTargets?
     private var frameCount: UInt64 = 0
+    private var edrHeadroom: Float = 1
     private var isPlaybackActive = false
     private var needsRedraw = false
     private var requestedPresentationTime: TimeInterval?
@@ -141,10 +142,7 @@ final class MetalRenderer: NSObject {
             throw InitializationError.textureCacheUnavailable(textureCacheStatus)
         }
 
-        let library = try device.makeLibrary(
-            source: ShaderLibrarySource.load(),
-            options: nil
-        )
+        let library = try ShaderLibrarySource.makeLibrary(device: device)
         let vertex = try Self.shaderFunction(
             named: "phosphorFullscreenVertex",
             in: library
@@ -165,9 +163,49 @@ final class MetalRenderer: NSObject {
             )
         }
 
+        func multiTargetPipeline(
+            _ functionName: String,
+            _ pixelFormats: [MTLPixelFormat],
+            _ label: String
+        ) throws -> any MTLRenderPipelineState {
+            let fragment = try Self.shaderFunction(named: functionName, in: library)
+            return try Self.makePipeline(
+                device: device,
+                vertex: vertex,
+                fragment: fragment,
+                colorPixelFormats: pixelFormats,
+                label: label
+            )
+        }
+
+        func maskPipeline(
+            usesSlotMask: Bool,
+            label: String
+        ) throws -> any MTLRenderPipelineState {
+            let constants = MTLFunctionConstantValues()
+            var specializedSlotMask = usesSlotMask
+            constants.setConstantValue(
+                &specializedSlotMask,
+                type: .bool,
+                index: 0
+            )
+            let fragment = try library.makeFunction(
+                name: "guestPhosphorMaskFragment",
+                constantValues: constants
+            )
+            return try Self.makePipeline(
+                device: device,
+                vertex: vertex,
+                fragment: fragment,
+                colorPixelFormat: layer.pixelFormat,
+                label: label
+            )
+        }
+
         self.device = device
         self.commandQueue = commandQueue
         self.textureCache = textureCache
+        diagnostics = MetalFrameDiagnostics.makeIfRequested(device: device)
         bypassNV12Pipeline = try pipeline(
             "phosphorBypassFragmentNV12",
             layer.pixelFormat,
@@ -178,30 +216,20 @@ final class MetalRenderer: NSObject {
             layer.pixelFormat,
             "Phosphor BGRA Bypass"
         )
-        decodeNV12Pipeline = try pipeline(
-            "phosphorDecodeFragmentNV12",
-            .rgba16Float,
-            "Guest Decode NV12"
+        prepareNV12Pipeline = try multiTargetPipeline(
+            "guestPrepareFrameNV12Fragment",
+            [.rgba16Float, .rgba16Float, .rgba16Float],
+            "Guest NV12 Decode, History, and Linearized Prepass"
         )
-        decodeBGRAPipeline = try pipeline(
-            "phosphorDecodeFragmentBGRA",
-            .rgba16Float,
-            "Guest Decode BGRA"
+        prepareBGRAPipeline = try multiTargetPipeline(
+            "guestPrepareFrameBGRAFragment",
+            [.rgba16Float, .rgba16Float, .rgba16Float],
+            "Guest BGRA Decode, History, and Linearized Prepass"
         )
-        afterglowPipeline = try pipeline(
-            "guestAfterglowFragment",
+        prepassLinearizedPipeline = try pipeline(
+            "guestPrepassLinearizedFragment",
             .rgba16Float,
-            "Guest Afterglow"
-        )
-        prepassPipeline = try pipeline(
-            "guestPrepassFragment",
-            .rgba16Float,
-            "Guest Color and Afterglow Prepass"
-        )
-        linearizePipeline = try pipeline(
-            "guestLinearizeFragment",
-            .rgba16Float,
-            "Guest Gamma Linearization"
+            "Guest Linearized Color and Afterglow Prepass"
         )
         sharpenPipeline = try pipeline(
             "guestHDSharpenFragment",
@@ -228,15 +256,13 @@ final class MetalRenderer: NSObject {
             .rgba16Float,
             "Guest Bloom Vertical"
         )
-        beamPipeline = try pipeline(
-            "guestHDBeamFragment",
-            .rgba16Float,
-            "Guest HD Beam Reconstruction"
+        apertureMaskPipeline = try maskPipeline(
+            usesSlotMask: false,
+            label: "Guest Aperture Grille"
         )
-        phosphorMaskPipeline = try pipeline(
-            "guestPhosphorMaskFragment",
-            layer.pixelFormat,
-            "Guest Physical Phosphor Mask"
+        slotMaskPipeline = try maskPipeline(
+            usesSlotMask: true,
+            label: "Guest Slot Mask"
         )
 
         layer.device = device
@@ -244,10 +270,9 @@ final class MetalRenderer: NSObject {
         super.init()
 
         displayLink.delegate = self
-        displayLink.preferredFrameRateRange = CAFrameRateRange(
-            minimum: 24,
-            maximum: 60,
-            preferred: 60
+        displayLink.preferredFrameLatency = 1
+        displayLink.preferredFrameRateRange = Self.preferredFrameRateRange(
+            nominalFrameRate: 0
         )
         displayLink.isPaused = true
         displayLink.add(to: .main, forMode: .common)
@@ -259,7 +284,9 @@ final class MetalRenderer: NSObject {
 
     func configure(
         output: AVPlayerItemVideoOutput?,
-        settings: ShaderSettings
+        settings: ShaderSettings,
+        edrHeadroom: Float,
+        nominalFrameRate: Float
     ) {
         if self.output !== output {
             lastPixelBuffer = nil
@@ -274,9 +301,34 @@ final class MetalRenderer: NSObject {
                 renderTargets = nil
             }
         }
+        let sanitizedHeadroom = edrHeadroom.isFinite
+            ? min(max(edrHeadroom, 1), 2)
+            : 1
+        if self.edrHeadroom != sanitizedHeadroom {
+            self.edrHeadroom = sanitizedHeadroom
+            needsRedraw = output != nil
+        }
         self.output = output
         self.settings = settings
+        displayLink.preferredFrameRateRange = Self.preferredFrameRateRange(
+            nominalFrameRate: nominalFrameRate
+        )
         updateDisplayLinkState()
+    }
+
+    static func preferredFrameRateRange(
+        nominalFrameRate: Float
+    ) -> CAFrameRateRange {
+        let preferred = nominalFrameRate.isFinite
+            && nominalFrameRate >= 1
+            && nominalFrameRate <= 240
+            ? nominalFrameRate
+            : 60
+        return CAFrameRateRange(
+            minimum: min(preferred, 24),
+            maximum: max(preferred, 60),
+            preferred: preferred
+        )
     }
 
     func setActive(_ isActive: Bool) {
@@ -367,11 +419,29 @@ final class MetalRenderer: NSObject {
         colorPixelFormat: MTLPixelFormat,
         label: String
     ) throws -> any MTLRenderPipelineState {
+        try makePipeline(
+            device: device,
+            vertex: vertex,
+            fragment: fragment,
+            colorPixelFormats: [colorPixelFormat],
+            label: label
+        )
+    }
+
+    private static func makePipeline(
+        device: any MTLDevice,
+        vertex: any MTLFunction,
+        fragment: any MTLFunction,
+        colorPixelFormats: [MTLPixelFormat],
+        label: String
+    ) throws -> any MTLRenderPipelineState {
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.label = label
         descriptor.vertexFunction = vertex
         descriptor.fragmentFunction = fragment
-        descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
+        for (index, pixelFormat) in colorPixelFormats.enumerated() {
+            descriptor.colorAttachments[index].pixelFormat = pixelFormat
+        }
         return try device.makeRenderPipelineState(descriptor: descriptor)
     }
 
@@ -410,6 +480,7 @@ final class MetalRenderer: NSObject {
             return
         }
         commandBuffer.label = "Phosphor Guest Advanced Frame"
+        diagnostics?.beginFrame()
 
         let currentDrawableSize = SIMD2(
             Float(drawable.texture.width),
@@ -428,7 +499,8 @@ final class MetalRenderer: NSObject {
                 rasterSize: rasterSize,
                 settings: settings,
                 yuvConversion: frame.yuvConversion,
-                frameCount: frameCount
+                frameCount: frameCount,
+                edrHeadroom: edrHeadroom
             )
             guard encodePass(
                 commandBuffer: commandBuffer,
@@ -441,10 +513,7 @@ final class MetalRenderer: NSObject {
                 return
             }
         } else {
-            guard let targets = targets(
-                rasterSize: raster,
-                drawableSize: SIMD2(drawable.texture.width, drawable.texture.height)
-            ) else {
+            guard let targets = targets(rasterSize: raster) else {
                 return
             }
 
@@ -455,7 +524,8 @@ final class MetalRenderer: NSObject {
                 settings: settings,
                 yuvConversion: frame.yuvConversion,
                 frameCount: frameCount,
-                historyIsValid: targets.historyIsValid
+                historyIsValid: targets.historyIsValid,
+                edrHeadroom: edrHeadroom
             )
             let historyRead = targets.history[targets.historyReadIndex]
             let historyWriteIndex = 1 - targets.historyReadIndex
@@ -469,110 +539,87 @@ final class MetalRenderer: NSObject {
                 ? 1 - targets.rawReadIndex
                 : targets.rawReadIndex
             let currentRaw = targets.raw[rawWriteIndex]
-            let previousRaw = targets.rawIsValid
-                ? targets.raw[targets.rawReadIndex]
-                : currentRaw
+            let previousRaw = targets.raw[targets.rawReadIndex]
+            let preparesFreshFrame = decodesSource && advancesHistory
 
-            if decodesSource {
+            if preparesFreshFrame {
                 guard encodePass(
                     commandBuffer: commandBuffer,
-                    pipeline: frame.decodePipeline,
-                    target: currentRaw,
-                    textures: frame.textures,
+                    pipeline: frame.preparePipeline,
+                    targets: [
+                        currentRaw,
+                        historyWrite,
+                        targets.prepassLinearized
+                    ],
+                    textures: frame.textures + [previousRaw, historyRead],
                     uniforms: &uniforms,
-                    label: "1 Decode Video"
+                    label: "1 Decode, History, and Linearized Prepass"
                 ) else {
                     return
                 }
-            }
-
-            let afterglow: any MTLTexture
-            if advancesHistory {
-                guard encodePass(
-                    commandBuffer: commandBuffer,
-                    pipeline: afterglowPipeline,
-                    target: historyWrite,
-                    textures: [previousRaw, historyRead],
-                    uniforms: &uniforms,
-                    label: "2 Afterglow Feedback"
-                ) else {
-                    return
-                }
-                afterglow = historyWrite
             } else {
-                afterglow = historyRead
+                guard encodePass(
+                    commandBuffer: commandBuffer,
+                    pipeline: prepassLinearizedPipeline,
+                    target: targets.prepassLinearized,
+                    textures: [currentRaw, historyRead],
+                    uniforms: &uniforms,
+                    label: "1 Linearized Color and Persistence Prepass"
+                ) else {
+                    return
+                }
             }
 
             guard encodePass(
                 commandBuffer: commandBuffer,
-                pipeline: prepassPipeline,
-                target: targets.prepass,
-                textures: [currentRaw, afterglow],
-                uniforms: &uniforms,
-                label: "3 Color and Persistence Prepass"
-            ), encodePass(
-                commandBuffer: commandBuffer,
-                pipeline: linearizePipeline,
-                target: targets.linearized,
-                textures: [targets.prepass],
-                uniforms: &uniforms,
-                label: "4 Gamma Linearization"
-            ), encodePass(
-                commandBuffer: commandBuffer,
                 pipeline: sharpenPipeline,
                 target: targets.sharpened,
-                textures: [targets.linearized],
+                textures: [targets.prepassLinearized],
                 uniforms: &uniforms,
-                label: "5 HD Horizontal Reconstruction"
+                label: "2 HD Horizontal Reconstruction"
             ), encodePass(
                 commandBuffer: commandBuffer,
                 pipeline: glowHorizontalPipeline,
                 target: targets.lightHorizontal,
-                textures: [targets.linearized],
+                textures: [targets.prepassLinearized],
                 uniforms: &uniforms,
-                label: "6 Glow Horizontal"
+                label: "3 Glow Horizontal"
             ), encodePass(
                 commandBuffer: commandBuffer,
                 pipeline: glowVerticalPipeline,
                 target: targets.glow,
                 textures: [targets.lightHorizontal],
                 uniforms: &uniforms,
-                label: "7 Glow Vertical"
+                label: "4 Glow Vertical"
             ), encodePass(
                 commandBuffer: commandBuffer,
                 pipeline: bloomHorizontalPipeline,
                 target: targets.lightHorizontal,
-                textures: [targets.linearized],
+                textures: [targets.prepassLinearized],
                 uniforms: &uniforms,
-                label: "8 Bloom Horizontal"
+                label: "5 Bloom Horizontal"
             ), encodePass(
                 commandBuffer: commandBuffer,
                 pipeline: bloomVerticalPipeline,
                 target: targets.bloom,
                 textures: [targets.lightHorizontal],
                 uniforms: &uniforms,
-                label: "9 Bloom Vertical"
+                label: "6 Bloom Vertical"
             ), encodePass(
                 commandBuffer: commandBuffer,
-                pipeline: beamPipeline,
-                target: targets.beam,
-                textures: [targets.sharpened, targets.bloom, targets.linearized],
-                uniforms: &uniforms,
-                label: "10 Luminance-dependent Beam Reconstruction"
-            ), encodePass(
-                commandBuffer: commandBuffer,
-                pipeline: phosphorMaskPipeline,
+                pipeline: settings.maskPattern == .slotMask
+                    ? slotMaskPipeline
+                    : apertureMaskPipeline,
                 target: drawable.texture,
                 textures: [
-                    targets.beam,
-                    targets.linearized,
+                    targets.sharpened,
                     targets.bloom,
-                    targets.prepass,
+                    targets.prepassLinearized,
                     targets.glow,
                     currentRaw
                 ],
                 uniforms: &uniforms,
-                label: "11 Native-pixel Phosphor Mask and Glass"
+                label: "7 Beam, Native-pixel Phosphor Mask, and Glass"
             ) else {
                 return
             }
@@ -589,8 +636,10 @@ final class MetalRenderer: NSObject {
 
         let semaphore = inFlightSemaphore
         let resources = frame.resources
-        commandBuffer.addCompletedHandler { _ in
+        let diagnostics = diagnostics
+        commandBuffer.addCompletedHandler { completedBuffer in
             _ = resources
+            diagnostics?.completeFrame(commandBuffer: completedBuffer)
             semaphore.signal()
         }
         commandBuffer.present(drawable)
@@ -611,10 +660,30 @@ final class MetalRenderer: NSObject {
         uniforms: inout ShaderUniforms,
         label: String
     ) -> Bool {
+        encodePass(
+            commandBuffer: commandBuffer,
+            pipeline: pipeline,
+            targets: [target],
+            textures: textures,
+            uniforms: &uniforms,
+            label: label
+        )
+    }
+
+    private func encodePass(
+        commandBuffer: any MTLCommandBuffer,
+        pipeline: any MTLRenderPipelineState,
+        targets: [any MTLTexture],
+        textures: [any MTLTexture],
+        uniforms: inout ShaderUniforms,
+        label: String
+    ) -> Bool {
         let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = target
-        pass.colorAttachments[0].loadAction = .dontCare
-        pass.colorAttachments[0].storeAction = .store
+        for (index, target) in targets.enumerated() {
+            pass.colorAttachments[index].texture = target
+            pass.colorAttachments[index].loadAction = .dontCare
+            pass.colorAttachments[index].storeAction = .store
+        }
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(
             descriptor: pass
@@ -623,6 +692,7 @@ final class MetalRenderer: NSObject {
         }
 
         encoder.label = label
+        diagnostics?.beginPass(label, encoder: encoder)
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentBytes(
             &uniforms,
@@ -633,24 +703,20 @@ final class MetalRenderer: NSObject {
             encoder.setFragmentTexture(texture, index: index)
         }
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        diagnostics?.endPass(encoder: encoder)
         encoder.endEncoding()
         return true
     }
 
-    private func targets(
-        rasterSize: SIMD2<Int>,
-        drawableSize: SIMD2<Int>
-    ) -> GuestRenderTargets? {
+    private func targets(rasterSize: SIMD2<Int>) -> GuestRenderTargets? {
         if let renderTargets,
-           renderTargets.rasterSize == rasterSize,
-           renderTargets.drawableSize == drawableSize {
+           renderTargets.rasterSize == rasterSize {
             return renderTargets
         }
 
         renderTargets = GuestRenderTargets(
             device: device,
-            rasterSize: rasterSize,
-            drawableSize: drawableSize
+            rasterSize: rasterSize
         )
         return renderTargets
     }
@@ -718,7 +784,7 @@ final class MetalRenderer: NSObject {
                 ? .full
                 : .video
             return PreparedFrame(
-                decodePipeline: decodeNV12Pipeline,
+                preparePipeline: prepareNV12Pipeline,
                 bypassPipeline: bypassNV12Pipeline,
                 textures: [lumaTexture, chromaTexture],
                 sourceSize: SIMD2(
@@ -748,7 +814,7 @@ final class MetalRenderer: NSObject {
             }
 
             return PreparedFrame(
-                decodePipeline: decodeBGRAPipeline,
+                preparePipeline: prepareBGRAPipeline,
                 bypassPipeline: bypassBGRAPipeline,
                 textures: [texture],
                 sourceSize: SIMD2(
@@ -827,7 +893,7 @@ extension MetalRenderer: CAMetalDisplayLinkDelegate {
 }
 
 private struct PreparedFrame {
-    let decodePipeline: any MTLRenderPipelineState
+    let preparePipeline: any MTLRenderPipelineState
     let bypassPipeline: any MTLRenderPipelineState
     let textures: [any MTLTexture]
     let sourceSize: SIMD2<Float>
@@ -837,16 +903,13 @@ private struct PreparedFrame {
 
 private final class GuestRenderTargets {
     let rasterSize: SIMD2<Int>
-    let drawableSize: SIMD2<Int>
     let raw: [any MTLTexture]
     let history: [any MTLTexture]
-    let prepass: any MTLTexture
-    let linearized: any MTLTexture
+    let prepassLinearized: any MTLTexture
     let sharpened: any MTLTexture
     let lightHorizontal: any MTLTexture
     let glow: any MTLTexture
     let bloom: any MTLTexture
-    let beam: any MTLTexture
 
     var rawReadIndex = 0
     var rawIsValid = false
@@ -855,8 +918,7 @@ private final class GuestRenderTargets {
 
     init?(
         device: any MTLDevice,
-        rasterSize: SIMD2<Int>,
-        drawableSize: SIMD2<Int>
+        rasterSize: SIMD2<Int>
     ) {
         func texture(
             width: Int,
@@ -895,14 +957,10 @@ private final class GuestRenderTargets {
             width: rasterSize.x,
             height: rasterSize.y,
             label: "Guest History B"
-        ), let prepass = texture(
+        ), let prepassLinearized = texture(
             width: rasterSize.x,
             height: rasterSize.y,
-            label: "Guest Color Prepass"
-        ), let linearized = texture(
-            width: rasterSize.x,
-            height: rasterSize.y,
-            label: "Guest Linearized"
+            label: "Guest Linearized Color Prepass"
         ), let sharpened = texture(
             width: rasterSize.x,
             height: rasterSize.y,
@@ -919,25 +977,18 @@ private final class GuestRenderTargets {
             width: rasterSize.x,
             height: 600,
             label: "Guest Bloom"
-        ), let beam = texture(
-            width: drawableSize.x,
-            height: drawableSize.y,
-            label: "Guest Beam Reconstruction"
         ) else {
             return nil
         }
 
         self.rasterSize = rasterSize
-        self.drawableSize = drawableSize
         raw = [raw0, raw1]
         history = [history0, history1]
-        self.prepass = prepass
-        self.linearized = linearized
+        self.prepassLinearized = prepassLinearized
         self.sharpened = sharpened
         self.lightHorizontal = lightHorizontal
         self.glow = glow
         self.bloom = bloom
-        self.beam = beam
     }
 }
 
