@@ -9,18 +9,18 @@ final class VideoColorMetadataTests: XCTestCase {
         )
 
         XCTAssertFalse(metadata.containsHDRVideo)
-        XCTAssertNil(metadata.sdrPathNotice)
+        XCTAssertNil(metadata.playbackNotice)
     }
 
-    func testHDRCharacteristicsProduceSDRPathNotice() {
+    func testHDRCharacteristicsProduceColorManagedNotice() {
         let metadata = VideoColorMetadata(
             mediaCharacteristics: [.visual, .containsHDRVideo]
         )
 
         XCTAssertTrue(metadata.containsHDRVideo)
         XCTAssertEqual(
-            metadata.sdrPathNotice,
-            "HDR video is rendered through the SDR path."
+            metadata.playbackNotice,
+            "HDR source is color-managed through the CRT tube model."
         )
     }
 }

@@ -1,3 +1,4 @@
+import CoreVideo
 import XCTest
 @testable import Phosphor
 
@@ -46,5 +47,74 @@ final class ColorConversionTests: XCTestCase {
         XCTAssertEqual(rgb.x, 1, accuracy: 0.01)
         XCTAssertEqual(rgb.y, 0, accuracy: 0.01)
         XCTAssertEqual(rgb.z, 0, accuracy: 0.01)
+    }
+
+    func testTenBitVideoRangeMapsNeutralBlackAndWhite() {
+        let conversion = YUVConversion.make(matrix: .bt2020, range: .video10)
+        let black = conversion.convert(y: 64 / 1_023, u: 0.5, v: 0.5)
+        let white = conversion.convert(y: 940 / 1_023, u: 0.5, v: 0.5)
+
+        XCTAssertEqual(black.x, 0, accuracy: 0.001)
+        XCTAssertEqual(black.y, 0, accuracy: 0.001)
+        XCTAssertEqual(black.z, 0, accuracy: 0.001)
+        XCTAssertEqual(white.x, 1, accuracy: 0.001)
+        XCTAssertEqual(white.y, 1, accuracy: 0.001)
+        XCTAssertEqual(white.z, 1, accuracy: 0.001)
+    }
+
+    func testPixelBufferHDRMetadataIsPreservedForShaderConversion() throws {
+        var pixelBuffer: CVPixelBuffer?
+        XCTAssertEqual(
+            CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                2,
+                2,
+                kCVPixelFormatType_64RGBAHalf,
+                nil,
+                &pixelBuffer
+            ),
+            kCVReturnSuccess
+        )
+        let buffer = try XCTUnwrap(pixelBuffer)
+        CVBufferSetAttachment(
+            buffer,
+            kCVImageBufferTransferFunctionKey,
+            kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ,
+            .shouldPropagate
+        )
+        CVBufferSetAttachment(
+            buffer,
+            kCVImageBufferColorPrimariesKey,
+            kCVImageBufferColorPrimaries_ITU_R_2020,
+            .shouldPropagate
+        )
+
+        XCTAssertEqual(
+            VideoColorConversion.make(for: buffer),
+            VideoColorConversion(
+                transferFunction: .pq,
+                primaries: .bt2020
+            )
+        )
+
+        CVBufferSetAttachment(
+            buffer,
+            kCVImageBufferTransferFunctionKey,
+            kCVImageBufferTransferFunction_ITU_R_2100_HLG,
+            .shouldPropagate
+        )
+        CVBufferSetAttachment(
+            buffer,
+            kCVImageBufferColorPrimariesKey,
+            kCVImageBufferColorPrimaries_P3_D65,
+            .shouldPropagate
+        )
+        XCTAssertEqual(
+            VideoColorConversion.make(for: buffer),
+            VideoColorConversion(
+                transferFunction: .hlg,
+                primaries: .displayP3
+            )
+        )
     }
 }

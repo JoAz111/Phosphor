@@ -38,28 +38,39 @@ break a sweat.
 
 > [!IMPORTANT]
 > Phosphor is an early FOSS preview. The physical CRT path is working,
-> but exact pixel parity with the complete upstream Guest Advanced preset is not
-> claimed yet. See [Fidelity and roadmap](#fidelity-and-roadmap) for the honest
-> boundary.
+> but it is a reference-informed simulation rather than a measurement of one
+> particular tube. See [Fidelity and roadmap](#fidelity-and-roadmap) for the
+> honest boundary.
 
 ## A CRT, not a filter
 
-- **Individual RGB phosphors.** Choose a continuous aperture grille or a true
-  two-dimensional slot-mask lattice. Slot mode draws separate rounded R/G/B
-  deposits, a black matrix in both axes, and vertically staggered neighboring
-  triads. On Retina displays, both patterns use physical pixels—not SwiftUI
+- **Individual RGB phosphors.** Choose a continuous aperture grille, a true
+  two-dimensional slot-mask lattice, or offset shadow-mask dots. Slot mode draws
+  separate rounded R/G/B deposits, a black matrix in both axes, and vertically
+  staggered neighboring triads. Shadow mode draws discrete delta-gun-style dot
+  triads. On Retina displays, all patterns use physical pixels—not SwiftUI
   points.
 - **Beams that react to the picture.** Dark detail produces narrow scanlines;
   bright areas excite wider, softer beams instead of receiving identical black
   stripes.
-- **A raster with time.** 240p is progressive; 480i alternates fields. At high
-  display refresh rates the virtual beam advances through part of the raster on
-  every presentation instead of stamping the whole image at once.
-- **Light with a memory.** A native-resolution excitation buffer gives red,
-  green, and blue phosphors separate decay curves while glow, bloom, and warm
-  faceplate scatter spread light through the tube.
+- **A raster with time.** 240p is progressive; 480i alternates fields. Every
+  physical pixel gets an analytical excitation time from its horizontal
+  position, scanline, field phase, active interval, blanking, and flyback. The
+  beam advances between display presentations instead of stamping the whole
+  image at once.
+- **Light with a memory.** A native-resolution excitation buffer analytically
+  integrates short, separate R/G/B emission curves. Local source-discontinuity
+  rejection prevents moving objects and hard cuts from dragging stale colored
+  light behind them, while glow, bloom, and warm faceplate scatter spread light
+  through the tube.
 - **Analog inputs.** Select clean RGB, bandwidth-limited S-Video, NTSC composite,
-  or PAL composite with chroma delay, dot crawl, and cross-color behavior.
+  or PAL composite. Composite modes encode a 4×-subcarrier active-picture
+  waveform, modulate YIQ or YUV with line/frame phase, apply distinct luma and
+  chroma bandwidth, then decode through a selectable notch or line-comb filter.
+- **Color-managed HDR.** PQ, HLG, BT.2020, Display P3, and 10-bit video-range
+  metadata survive decode. The renderer linearizes the source, maps it into the
+  chosen tube response, and emits through the Mac display's available EDR
+  headroom.
 - **Built to run like butter.** Hardware-decoded frames enter Metal through
   `CVPixelBuffer` surfaces and remain on the GPU through the CRT graph. Phosphor
   reconstructs the tube only when the video produces a new frame.
@@ -79,7 +90,10 @@ pass follows the Mac display—up to 120 Hz or beyond—to advance channel-speci
 phosphor decay without rerunning the full graph for duplicate video frames.
 Excitation history uses Apple's compact `RG11B10Float` format where supported,
 the wide glow kernel is folded into paired bilinear samples, mask variants are
-specialized up front, and in-flight work is deliberately bounded.
+specialized up front, and in-flight work is deliberately bounded. The current
+and previous decoded frames are retained only for local motion-discontinuity
+rejection; the obsolete source-frame afterglow target and its extra render write
+are gone.
 
 Phosphor also measures the final pass with Metal's GPU timestamps. If a display
 cadence is genuinely unsustainable, it settles on a stable lower presentation
@@ -158,27 +172,30 @@ Useful development modes:
 - Play or pause with **Space**.
 - Seek and change volume from the floating player controls.
 - Use **Bypass CRT Effect** for an immediate source comparison.
-- Choose a Consumer TV, Trinitron, or PVM tube calibration in **Advanced CRT
-  Settings**, then tune raster mode, analog signal, persistence, convergence,
-  focus, curvature, scanlines, mask, glow, and vignette.
+- Choose a Consumer TV, Trinitron, or Studio Monitor tube profile in **Advanced
+  CRT Settings**, then tune raster mode, analog signal, notch/comb decoding,
+  stable or low-persistence motion, convergence, focus, curvature, scanlines,
+  mask, glow, and vignette. Low Persistence activates only on displays capable
+  of at least 100 Hz.
 - Enter full screen with the standard macOS window control.
 
 ## How it works
 
 ```text
 AVFoundation or in-process FFmpeg decode
-  → VideoToolbox CVPixelBuffer / Metal-compatible software fallback
+  → tagged 8-bit, 10-bit, or linear half-float CVPixelBuffer
   → CVMetalTextureCache input
-  → RGB / S-Video / NTSC / PAL signal reconstruction
-  → encoded current/previous frame buffers
-  → source history and color prepass
+  → source transfer-function and gamut conversion into virtual CRT drive
+  → RGB / S-Video path, or 4fsc NTSC/PAL waveform encode + notch/comb decode
+  → current/previous decoded frames for local motion rejection
+  → color prepass
   → Guest 1.8-gamma linearization
   → horizontal reconstruction
   → folded glow and bloom diffusion
-  → cached native-resolution tube emission with optional alternating fields
-  → display-rate, channel-specific RGB phosphor excitation and decay
-  → physical-pixel aperture grille or 2D slot lattice, halation, and glass
-  → CAMetalLayer
+  → cached native-resolution tube emission with aperture, slot, or shadow mask
+  → analytical horizontal/vertical beam timing with blanking and flyback
+  → display-rate, time-integrated RGB phosphor excitation and decay
+  → EDR-aware halation, faceplate scatter, curved glass, and CAMetalLayer
 ```
 
 The Metal graph is based on
@@ -192,23 +209,33 @@ remains separate from the CRT graph.
 The current renderer ports Guest Advanced HD's core signal path: source history,
 color prepass, 1.8-gamma linearization, reconstruction filters, luminance-driven
 beam response, glow/bloom stages, brightness compensation, and the final mask.
-Phosphor adds a display-rate electron-beam model, automatic field metadata plus
-explicit 240p/480i modes, native-resolution channel-specific phosphor decay,
-analog signal choices, tube profiles, edge focus, and convergence error.
+Phosphor adds analytical horizontal and vertical electron-beam timing, automatic
+field metadata plus explicit 240p/480i modes, native-resolution channel-specific
+phosphor decay, oversampled composite encode/decode, HDR input and EDR emission,
+tube profiles, edge focus, and convergence error.
 
 Phosphor includes Guest's type 6 RGB aperture grille and a separately modeled
-shadow-mask lattice. The slot mask is not grille output with horizontal bars:
-each RGB deposit has its own rounded aperture and surrounding black matrix, and
-alternating triads are offset vertically. Bright emitters grow into the matrix
-the way an energized beam spot grows on a tube.
+slot-mask lattice plus a genuine offset dot-triad shadow mask. The slot mask is
+not grille output with horizontal bars: each RGB deposit has its own rounded
+aperture and surrounding black matrix, and alternating triads are offset
+vertically. Bright emitters grow into the matrix the way an energized beam spot
+grows on a tube.
+
+The Consumer TV, Trinitron, and Studio Monitor profiles are coherent,
+historically informed parameter sets—not measurements of named physical units.
+The mask system exposes pitch, emitter dimensions, black matrix, staggering,
+grille-wire width, and brightness-dependent spot growth internally, so real
+measurement packs can replace the reference values without rewriting the
+renderer. Likewise, NTSC and PAL now travel through an oversampled active-video
+waveform, but Phosphor does not yet simulate an RF tuner, IF stages, sync pulses,
+or a noisy broadcast channel.
 
 Still to come:
 
 - Pixel-parity fixtures captured from a pinned RetroArch reference renderer
-- Optional color LUTs and the remaining Guest shadow-mask patterns
-- Additional shadow-mask geometries and VGA-specific branches
-- Calibrated RF input, vertical sync instability, and service-menu controls
-- HDR-native output rather than the current clearly identified SDR path
+- Measurement packs captured from real reference tubes and macro photography
+- Optional color LUTs and additional historical mask geometries
+- RF/IF input, sync instability, and service-menu controls
 
 ## Development
 
@@ -221,10 +248,11 @@ DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
 
 The suite includes live-GPU checks for every Metal entry point, Guest's input
 gamma, channel-specific phosphor decay, alternating interlaced fields,
-luminance-dependent raster lines, discrete RGB phosphors, the two-dimensional
-slot lattice and black matrix, adaptive GPU budgeting, and true bypass. It also
-decodes a real Matroska file through the in-process FFmpeg path and verifies
-that playback creates no prepared media.
+luminance-dependent raster lines, within-scanline beam timing, aperture/slot/dot
+phosphors and black matrices, 4fsc composite encode/decode, HDR metadata and
+10-bit range conversion, adaptive GPU budgeting, and true bypass. It also
+decodes a real Matroska file through the in-process FFmpeg path and verifies that
+playback creates no prepared media.
 
 <details>
 <summary>Project structure</summary>

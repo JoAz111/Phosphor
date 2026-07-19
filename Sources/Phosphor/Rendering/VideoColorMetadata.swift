@@ -1,7 +1,7 @@
 import AVFoundation
 
 struct VideoColorMetadata: Equatable, Sendable {
-    static let hdrSDRPathNotice = "HDR video is rendered through the SDR path."
+    static let hdrPlaybackNotice = "HDR source is color-managed through the CRT tube model."
 
     let containsHDRVideo: Bool
 
@@ -13,7 +13,7 @@ struct VideoColorMetadata: Equatable, Sendable {
         containsHDRVideo = mediaCharacteristics.contains(.containsHDRVideo)
     }
 
-    var sdrPathNotice: String? {
-        containsHDRVideo ? Self.hdrSDRPathNotice : nil
+    var playbackNotice: String? {
+        containsHDRVideo ? Self.hdrPlaybackNotice : nil
     }
 }

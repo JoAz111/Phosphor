@@ -166,7 +166,7 @@ final class PlayerStore {
             nominalFrameRate = Self.finiteNonnegative(prepared.nominalFrameRate)
             scanMetadata = prepared.scanMetadata
             errorMessage = nil
-            noticeMessage = prepared.colorMetadata.sdrPathNotice
+            noticeMessage = prepared.colorMetadata.playbackNotice
             if let preparationNotice = prepared.preparation.notice {
                 noticeMessage = [noticeMessage, preparationNotice]
                     .compactMap { $0 }

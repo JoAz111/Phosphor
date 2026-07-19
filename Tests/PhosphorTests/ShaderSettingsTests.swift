@@ -17,6 +17,8 @@ final class ShaderSettingsTests: XCTestCase {
         XCTAssertEqual(settings.focus, 0.12)
         XCTAssertEqual(settings.rasterMode, .automatic)
         XCTAssertEqual(settings.signalType, .rgb)
+        XCTAssertEqual(settings.compositeDecoder, .lineComb)
+        XCTAssertEqual(settings.temporalMode, .stable)
         XCTAssertEqual(settings.tubeProfile, .consumerTV)
     }
 

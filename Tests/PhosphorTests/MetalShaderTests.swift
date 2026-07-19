@@ -27,8 +27,8 @@ final class MetalShaderTests: XCTestCase {
             descriptor.fragmentFunction = try fragmentFunction(
                 named: entryPoint.name,
                 library: library,
-                usesSlotMask: maskEntryPoints.contains(entryPoint.name)
-                    ? false
+                maskPattern: maskEntryPoints.contains(entryPoint.name)
+                    ? .apertureGrille
                     : nil
             )
             for (index, pixelFormat) in entryPoint.pixelFormats.enumerated() {
@@ -45,12 +45,25 @@ final class MetalShaderTests: XCTestCase {
         slotDescriptor.fragmentFunction = try fragmentFunction(
             named: "guestPhosphorMaskFragment",
             library: library,
-            usesSlotMask: true
+            maskPattern: .slotMask
         )
         slotDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
         XCTAssertNoThrow(
             try device.makeRenderPipelineState(descriptor: slotDescriptor),
             "guestPhosphorMaskFragment slot-mask specialization"
+        )
+
+        let shadowDescriptor = MTLRenderPipelineDescriptor()
+        shadowDescriptor.vertexFunction = vertex
+        shadowDescriptor.fragmentFunction = try fragmentFunction(
+            named: "guestPhosphorMaskFragment",
+            library: library,
+            maskPattern: .shadowMask
+        )
+        shadowDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        XCTAssertNoThrow(
+            try device.makeRenderPipelineState(descriptor: shadowDescriptor),
+            "guestPhosphorMaskFragment shadow-mask specialization"
         )
     }
 
@@ -274,6 +287,60 @@ final class MetalShaderTests: XCTestCase {
         XCTAssertGreaterThan(staggeredOddSlot.z, staggeredOddMatrix.z + 20)
     }
 
+    func testShadowMaskCreatesOffsetRGBDotsAndBlackMatrix() throws {
+        let size = 36
+        let sharpened = try makeSolidFloatTexture(
+            width: size,
+            height: size,
+            color: SIMD4<Float>(0.25, 0.25, 0.25, 0.20)
+        )
+        let black = try makeSolidFloatTexture(
+            width: size,
+            height: size,
+            color: SIMD4<Float>(0, 0, 0, 1)
+        )
+        let pixels = try render(
+            function: "guestPhosphorMaskFragment",
+            outputSize: SIMD2(size, size),
+            outputFormat: .bgra8Unorm_srgb,
+            textures: [sharpened, black, black, black, black],
+            settings: ShaderSettings(
+                intensity: 1,
+                curvature: 0,
+                scanlines: 0,
+                mask: 1,
+                maskPattern: .shadowMask,
+                glow: 0,
+                vignette: 0
+            )
+        )
+
+        var redDots = 0
+        var greenDots = 0
+        var blueDots = 0
+        var blackMatrix = 0
+        for y in 0 ..< size {
+            for x in 0 ..< size {
+                let pixel = bgraPixel(pixels, width: size, x: x, y: y)
+                let blue = Int(pixel.x)
+                let green = Int(pixel.y)
+                let red = Int(pixel.z)
+                if red > green + 20, red > blue + 20 { redDots += 1 }
+                if green > red + 20, green > blue + 20 { greenDots += 1 }
+                if blue > red + 20, blue > green + 20 { blueDots += 1 }
+                if max(red, green, blue) < 16 { blackMatrix += 1 }
+            }
+        }
+
+        XCTAssertGreaterThan(redDots, 0)
+        XCTAssertGreaterThan(greenDots, 0)
+        XCTAssertGreaterThan(blueDots, 0)
+        XCTAssertGreaterThanOrEqual(
+            blackMatrix,
+            redDots + greenDots + blueDots
+        )
+    }
+
     func testTubeGlowAddsNeutralBloomAndWarmHalation() throws {
         let size = 12
         let sharpened = try makeSolidFloatTexture(
@@ -385,8 +452,42 @@ final class MetalShaderTests: XCTestCase {
         let blue = halfFloatChannel(pixels, width: size, x: 4, y: 4, channel: 2)
         XCTAssertGreaterThan(green, red)
         XCTAssertGreaterThan(red, blue)
+        XCTAssertLessThan(green / blue, 1.5)
         XCTAssertLessThan(green, 0.5)
         XCTAssertGreaterThan(blue, 0)
+    }
+
+    func testBeamTimingChangesAcrossOnePhysicalScanline() throws {
+        let size = 8
+        let current = try makeSolidFloatTexture(
+            width: size,
+            height: size,
+            color: SIMD4<Float>(0.30, 0.30, 0.30, 0.30)
+        )
+        let black = try makeSolidFloatTexture(
+            width: size,
+            height: size,
+            color: SIMD4<Float>(0, 0, 0, 1)
+        )
+        let pixels = try renderTemporal(
+            outputSize: SIMD2(size, size),
+            textures: [current, black, black, black, black, black],
+            settings: ShaderSettings(
+                intensity: 1,
+                curvature: 0,
+                scanlines: 0,
+                mask: 0,
+                glow: 0,
+                vignette: 0
+            ),
+            presentationDelta: 1 / 120,
+            scanPhase: 0.498,
+            scanSpan: 0.0025
+        )
+
+        let left = halfFloatRed(pixels, width: size, x: 1, y: 4)
+        let right = halfFloatRed(pixels, width: size, x: 6, y: 4)
+        XCTAssertGreaterThan(abs(left - right), 0.01)
     }
 
     func testTemporalPresentationIntegratesRasterExposureWithoutVisibleStrobe() throws {
@@ -423,7 +524,8 @@ final class MetalShaderTests: XCTestCase {
             presentationDelta: 1 / 120,
             scanPhase: 0,
             scanSpan: 0,
-            readsDisplay: true
+            readsDisplay: true,
+            presentationHistoryIsValid: false
         )
 
         let reference = bgraPixel(baseline, width: size, x: 4, y: 4)
@@ -435,21 +537,60 @@ final class MetalShaderTests: XCTestCase {
     }
 
     func testCompositeSignalHasFiniteLumaBandwidth() throws {
-        let source = try makeStepTexture(width: 8, height: 4)
+        let width = 256
+        let source = try makeStepTexture(width: width, height: 4)
         let rgb = try renderPreparedRaw(
             colorTexture: source,
             settings: ShaderSettings(signalType: .rgb)
         )
-        let composite = try renderPreparedRaw(
+        let notch = try renderCompositeDecoded(
             colorTexture: source,
-            settings: ShaderSettings(signalType: .compositeNTSC)
+            settings: ShaderSettings(
+                signalType: .compositeNTSC,
+                compositeDecoder: .notch
+            )
+        )
+        let comb = try renderCompositeDecoded(
+            colorTexture: source,
+            settings: ShaderSettings(
+                signalType: .compositeNTSC,
+                compositeDecoder: .lineComb
+            )
         )
 
-        let rgbEdge = halfFloatRed(rgb, width: 8, x: 4, y: 2)
-        let compositeEdge = halfFloatRed(composite, width: 8, x: 4, y: 2)
+        let rgbEdge = halfFloatRed(rgb, width: width, x: width / 2, y: 2)
+        let notchEdge = halfFloatRed(notch, width: width, x: width / 2, y: 2)
+        let combEdge = halfFloatRed(comb, width: width, x: width / 2, y: 2)
         XCTAssertGreaterThan(rgbEdge, 0.95)
-        XCTAssertLessThan(compositeEdge, rgbEdge - 0.10)
-        XCTAssertGreaterThan(compositeEdge, 0.45)
+        XCTAssertLessThan(notchEdge, combEdge)
+        XCTAssertLessThan(notchEdge, rgbEdge - 0.02)
+        XCTAssertGreaterThan(notchEdge, 0.45)
+    }
+
+    func testPALCompositeWaveformRoundTripsColorThroughTwoLineComb() throws {
+        let width = 64
+        let source = try makeSolidTexture(
+            width: width,
+            height: 8,
+            pixelFormat: .bgra8Unorm,
+            color: SIMD4<UInt8>(32, 48, 224, 255)
+        )
+        let decoded = try renderCompositeDecoded(
+            colorTexture: source,
+            settings: ShaderSettings(
+                signalType: .compositePAL,
+                compositeDecoder: .lineComb
+            )
+        )
+
+        let red = halfFloatChannel(decoded, width: width, x: 32, y: 4, channel: 0)
+        let green = halfFloatChannel(decoded, width: width, x: 32, y: 4, channel: 1)
+        let blue = halfFloatChannel(decoded, width: width, x: 32, y: 4, channel: 2)
+        XCTAssertTrue(red.isFinite)
+        XCTAssertTrue(green.isFinite)
+        XCTAssertTrue(blue.isFinite)
+        XCTAssertGreaterThan(red, green)
+        XCTAssertGreaterThan(red, blue)
     }
 
     private var expectedEntryPoints: [(name: String, pixelFormats: [MTLPixelFormat])] {
@@ -460,11 +601,17 @@ final class MetalShaderTests: XCTestCase {
             ("phosphorDecodeFragmentBGRA", [.rgba16Float]),
             (
                 "guestPrepareFrameNV12Fragment",
-                [.rgba16Float, .rgba16Float, .rgba16Float]
+                [.rgba16Float, .rgba16Float]
             ),
             (
                 "guestPrepareFrameBGRAFragment",
-                [.rgba16Float, .rgba16Float, .rgba16Float]
+                [.rgba16Float, .rgba16Float]
+            ),
+            ("guestCompositeEncodeNV12Fragment", [.r16Float]),
+            ("guestCompositeEncodeBGRAFragment", [.r16Float]),
+            (
+                "guestCompositeDecodeFragment",
+                [.rgba16Float, .rgba16Float]
             ),
             ("guestAfterglowFragment", [.rgba16Float]),
             ("guestPrepassFragment", [.rgba16Float]),
@@ -514,8 +661,8 @@ final class MetalShaderTests: XCTestCase {
         descriptor.fragmentFunction = try fragmentFunction(
             named: function,
             library: library,
-            usesSlotMask: maskEntryPoints.contains(function)
-                ? settings.maskPattern == .slotMask
+            maskPattern: maskEntryPoints.contains(function)
+                ? settings.maskPattern
                 : nil
         )
         descriptor.colorAttachments[0].pixelFormat = outputFormat
@@ -587,7 +734,8 @@ final class MetalShaderTests: XCTestCase {
         presentationDelta: Float,
         scanPhase: Float,
         scanSpan: Float,
-        readsDisplay: Bool = false
+        readsDisplay: Bool = false,
+        presentationHistoryIsValid: Bool = true
     ) throws -> [UInt8] {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("Metal is unavailable on this system")
@@ -603,7 +751,7 @@ final class MetalShaderTests: XCTestCase {
         descriptor.fragmentFunction = try fragmentFunction(
             named: "guestPhosphorTemporalFragment",
             library: library,
-            usesSlotMask: settings.maskPattern == .slotMask
+            maskPattern: settings.maskPattern
         )
         descriptor.colorAttachments[0].pixelFormat = .rgba16Float
         descriptor.colorAttachments[1].pixelFormat = .bgra8Unorm_srgb
@@ -632,7 +780,7 @@ final class MetalShaderTests: XCTestCase {
             presentationDelta: presentationDelta,
             scanPhase: scanPhase,
             scanSpan: scanSpan,
-            presentationHistoryIsValid: true
+            presentationHistoryIsValid: presentationHistoryIsValid
         )
 
         let pass = MTLRenderPassDescriptor()
@@ -715,13 +863,7 @@ final class MetalShaderTests: XCTestCase {
         }
 
         let raw = try target()
-        let history = try target()
         let prepass = try target()
-        let black = try makeSolidFloatTexture(
-            width: colorTexture.width,
-            height: colorTexture.height,
-            color: SIMD4<Float>(0, 0, 0, 1)
-        )
         var uniforms = ShaderUniforms(
             drawableSize: SIMD2(Float(colorTexture.width), Float(colorTexture.height)),
             sourceSize: SIMD2(Float(colorTexture.width), Float(colorTexture.height)),
@@ -730,7 +872,7 @@ final class MetalShaderTests: XCTestCase {
             yuvConversion: .make(matrix: .bt709, range: .full)
         )
         let pass = MTLRenderPassDescriptor()
-        for (index, texture) in [raw, history, prepass].enumerated() {
+        for (index, texture) in [raw, prepass].enumerated() {
             pass.colorAttachments[index].texture = texture
             pass.colorAttachments[index].loadAction = .clear
             pass.colorAttachments[index].storeAction = .store
@@ -748,10 +890,145 @@ final class MetalShaderTests: XCTestCase {
             index: 0
         )
         encoder.setFragmentTexture(colorTexture, index: 0)
-        encoder.setFragmentTexture(black, index: 1)
-        encoder.setFragmentTexture(black, index: 2)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        XCTAssertEqual(commandBuffer.status, .completed)
+        XCTAssertNil(commandBuffer.error)
+
+        var pixels = [UInt8](
+            repeating: 0,
+            count: colorTexture.width * colorTexture.height * 8
+        )
+        pixels.withUnsafeMutableBytes { bytes in
+            raw.getBytes(
+                bytes.baseAddress!,
+                bytesPerRow: colorTexture.width * 8,
+                from: MTLRegionMake2D(
+                    0,
+                    0,
+                    colorTexture.width,
+                    colorTexture.height
+                ),
+                mipmapLevel: 0
+            )
+        }
+        return pixels
+    }
+
+    private func renderCompositeDecoded(
+        colorTexture: any MTLTexture,
+        settings: ShaderSettings
+    ) throws -> [UInt8] {
+        let device = colorTexture.device
+        let library = try device.makeLibrary(
+            source: ShaderLibrarySource.load(),
+            options: nil
+        )
+        let vertex = try XCTUnwrap(
+            library.makeFunction(name: "phosphorFullscreenVertex")
+        )
+
+        let encodeDescriptor = MTLRenderPipelineDescriptor()
+        encodeDescriptor.vertexFunction = vertex
+        encodeDescriptor.fragmentFunction = try XCTUnwrap(
+            library.makeFunction(name: "guestCompositeEncodeBGRAFragment")
+        )
+        encodeDescriptor.colorAttachments[0].pixelFormat = .r16Float
+        let encodePipeline = try device.makeRenderPipelineState(
+            descriptor: encodeDescriptor
+        )
+
+        let decodeDescriptor = MTLRenderPipelineDescriptor()
+        decodeDescriptor.vertexFunction = vertex
+        decodeDescriptor.fragmentFunction = try XCTUnwrap(
+            library.makeFunction(name: "guestCompositeDecodeFragment")
+        )
+        decodeDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
+        decodeDescriptor.colorAttachments[1].pixelFormat = .rgba16Float
+        let decodePipeline = try device.makeRenderPipelineState(
+            descriptor: decodeDescriptor
+        )
+
+        func target(
+            _ format: MTLPixelFormat,
+            width: Int,
+            height: Int
+        ) throws -> any MTLTexture {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: format,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            descriptor.storageMode = .shared
+            descriptor.usage = [.renderTarget, .shaderRead]
+            return try XCTUnwrap(device.makeTexture(descriptor: descriptor))
+        }
+
+        let sampleCount = settings.signalType == .compositePAL ? 1_135 : 910
+        let waveform = try target(
+            .r16Float,
+            width: sampleCount,
+            height: colorTexture.height
+        )
+        let raw = try target(
+            .rgba16Float,
+            width: colorTexture.width,
+            height: colorTexture.height
+        )
+        let prepass = try target(
+            .rgba16Float,
+            width: colorTexture.width,
+            height: colorTexture.height
+        )
+        var uniforms = ShaderUniforms(
+            drawableSize: SIMD2(Float(colorTexture.width), Float(colorTexture.height)),
+            sourceSize: SIMD2(Float(colorTexture.width), Float(colorTexture.height)),
+            rasterSize: SIMD2(Float(colorTexture.width), Float(colorTexture.height)),
+            settings: settings,
+            yuvConversion: .make(matrix: .bt709, range: .full)
+        )
+        let commandBuffer = try XCTUnwrap(
+            device.makeCommandQueue()?.makeCommandBuffer()
+        )
+
+        let encodePass = MTLRenderPassDescriptor()
+        encodePass.colorAttachments[0].texture = waveform
+        encodePass.colorAttachments[0].loadAction = .clear
+        encodePass.colorAttachments[0].storeAction = .store
+        let encode = try XCTUnwrap(
+            commandBuffer.makeRenderCommandEncoder(descriptor: encodePass)
+        )
+        encode.setRenderPipelineState(encodePipeline)
+        encode.setFragmentBytes(
+            &uniforms,
+            length: MemoryLayout<ShaderUniforms>.stride,
+            index: 0
+        )
+        encode.setFragmentTexture(colorTexture, index: 0)
+        encode.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encode.endEncoding()
+
+        let decodePass = MTLRenderPassDescriptor()
+        for (index, texture) in [raw, prepass].enumerated() {
+            decodePass.colorAttachments[index].texture = texture
+            decodePass.colorAttachments[index].loadAction = .clear
+            decodePass.colorAttachments[index].storeAction = .store
+        }
+        let decode = try XCTUnwrap(
+            commandBuffer.makeRenderCommandEncoder(descriptor: decodePass)
+        )
+        decode.setRenderPipelineState(decodePipeline)
+        decode.setFragmentBytes(
+            &uniforms,
+            length: MemoryLayout<ShaderUniforms>.stride,
+            index: 0
+        )
+        decode.setFragmentTexture(waveform, index: 0)
+        decode.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        decode.endEncoding()
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         XCTAssertEqual(commandBuffer.status, .completed)
@@ -780,17 +1057,17 @@ final class MetalShaderTests: XCTestCase {
     private func fragmentFunction(
         named name: String,
         library: any MTLLibrary,
-        usesSlotMask: Bool?
+        maskPattern: PhosphorMaskPattern?
     ) throws -> any MTLFunction {
-        guard let usesSlotMask else {
+        guard let maskPattern else {
             return try XCTUnwrap(library.makeFunction(name: name))
         }
 
         let constants = MTLFunctionConstantValues()
-        var specializedSlotMask = usesSlotMask
+        var specializedMaskPattern = UInt16(maskPattern.rawValue)
         constants.setConstantValue(
-            &specializedSlotMask,
-            type: .bool,
+            &specializedMaskPattern,
+            type: .ushort,
             index: 0
         )
         return try library.makeFunction(

@@ -23,6 +23,8 @@ final class ControlBindingTests: XCTestCase {
             focus: -1,
             rasterMode: .interlaced480,
             signalType: .compositePAL,
+            compositeDecoder: .notch,
+            temporalMode: .lowPersistence,
             tubeProfile: .professionalMonitor
         )
 
@@ -41,6 +43,8 @@ final class ControlBindingTests: XCTestCase {
                 focus: -1,
                 rasterMode: .interlaced480,
                 signalType: .compositePAL,
+                compositeDecoder: .notch,
+                temporalMode: .lowPersistence,
                 tubeProfile: .professionalMonitor
             )
         )
@@ -76,6 +80,8 @@ final class ControlBindingTests: XCTestCase {
             focus: 0.9,
             rasterMode: .interlaced480,
             signalType: .compositeNTSC,
+            compositeDecoder: .notch,
+            temporalMode: .lowPersistence,
             tubeProfile: .professionalMonitor,
             edrPhosphors: false
         )

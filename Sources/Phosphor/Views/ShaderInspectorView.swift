@@ -43,6 +43,16 @@ struct ShaderInspectorView: View {
                 values: CRTSignalType.allCases,
                 label: \CRTSignalType.displayName
             )
+            if preferences.signalType == .compositeNTSC
+                || preferences.signalType == .compositePAL {
+                InspectorEnumPicker(
+                    title: "Composite Decoder",
+                    selection: $preferences.compositeDecoder,
+                    values: CRTCompositeDecoder.allCases,
+                    label: \CRTCompositeDecoder.displayName,
+                    segmented: true
+                )
+            }
             InspectorSlider(
                 title: "Beam Scanlines",
                 value: $preferences.scanlines,
@@ -63,6 +73,13 @@ struct ShaderInspectorView: View {
                 title: "Phosphor Persistence",
                 value: $preferences.persistence,
                 range: 0 ... 1
+            )
+            InspectorEnumPicker(
+                title: "Motion",
+                selection: $preferences.temporalMode,
+                values: CRTTemporalMode.allCases,
+                label: \CRTTemporalMode.displayName,
+                segmented: true
             )
             InspectorSlider(
                 title: "Edge Convergence",

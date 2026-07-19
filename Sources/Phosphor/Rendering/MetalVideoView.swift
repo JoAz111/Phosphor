@@ -185,7 +185,7 @@ final class MetalVideoView: NSView {
         let usesEDR = requestsEDRPhosphors && potentialHeadroom > 1
         let updatedConfiguration = DisplayConfiguration(
             usesEDR: usesEDR,
-            headroom: usesEDR ? min(max(potentialHeadroom, 1), 2) : 1,
+            headroom: usesEDR ? min(max(potentialHeadroom, 1), 16) : 1,
             maximumFrameRate: Float(window?.screen?.maximumFramesPerSecond ?? 60)
         )
         guard displayConfiguration != updatedConfiguration else { return }

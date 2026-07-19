@@ -42,6 +42,10 @@ struct alignas(16) ShaderUniforms {
     float4 temporalResponse;
     float4 tubeData;
     float4 videoData;
+    float4 sourceColor;
+    float4 scanTiming;
+    float4 maskGeometry;
+    float4 compositeData;
 };
 
 struct FullscreenVertex {
@@ -64,12 +68,101 @@ constexpr sampler phosphorLinearSampler(
 // The mask geometry is uniform for an entire frame. Specializing it when the
 // pipeline is created lets Apple GPU compilation completely remove the unused
 // aperture-only or slot-mask branch from the native-pixel final pass.
-constant bool guestUsesSlotMask [[function_constant(0)]];
+constant ushort guestMaskPattern [[function_constant(0)]];
 
 float3 phosphorSRGBToLinear(float3 color) {
     float3 low = color / 12.92;
     float3 high = pow((color + 0.055) / 1.055, float3(2.4));
     return select(low, high, color > 0.04045);
+}
+
+float3 phosphorLinearToSRGB(float3 color) {
+    float3 positive = max(color, 0.0);
+    float3 low = positive * 12.92;
+    float3 high = 1.055 * pow(positive, float3(1.0 / 2.4)) - 0.055;
+    return select(low, high, positive > 0.0031308);
+}
+
+float3 phosphorPQToLinear(float3 encoded) {
+    constexpr float m1 = 2610.0 / 16384.0;
+    constexpr float m2 = 2523.0 / 32.0;
+    constexpr float c1 = 3424.0 / 4096.0;
+    constexpr float c2 = 2413.0 / 128.0;
+    constexpr float c3 = 2392.0 / 128.0;
+    float3 power = pow(saturate(encoded), float3(1.0 / m2));
+    float3 normalizedNits = pow(
+        max(power - c1, 0.0) / max(c2 - c3 * power, 0.000001),
+        float3(1.0 / m1)
+    );
+    // PQ is absolute up to 10,000 nits. CRT drive is expressed relative to
+    // 203-nit HDR reference white before the tube's own highlight compression.
+    return normalizedNits * (10000.0 / 203.0);
+}
+
+float3 phosphorHLGToLinear(float3 encoded) {
+    constexpr float a = 0.17883277;
+    constexpr float b = 0.28466892;
+    constexpr float c = 0.55991073;
+    float3 low = encoded * encoded / 3.0;
+    float3 high = (exp((encoded - c) / a) + b) / 12.0;
+    float3 sceneLinear = select(low, high, encoded > 0.5);
+    // Apply the nominal BT.2100 display OOTF and normalize diffuse white.
+    return pow(max(sceneLinear, 0.0), float3(1.2)) * 3.0;
+}
+
+float3 phosphorToSRGBPrimaries(float3 linear, float primaries) {
+    if (primaries > 1.5) {
+        const float3x3 bt2020ToSRGB = float3x3(
+            float3(1.660491, -0.124550, -0.018151),
+            float3(-0.587641, 1.132900, -0.100579),
+            float3(-0.072850, -0.008349, 1.118730)
+        );
+        return bt2020ToSRGB * linear;
+    }
+    if (primaries > 0.5) {
+        const float3x3 displayP3ToSRGB = float3x3(
+            float3(1.224940, -0.042057, -0.019638),
+            float3(-0.224940, 1.042057, -0.078636),
+            float3(0.0, 0.0, 1.098274)
+        );
+        return displayP3ToSRGB * linear;
+    }
+    return linear;
+}
+
+// Converts tagged video into the encoded drive expected by the virtual tube.
+// HDR values retain their scene relationships through a soft shoulder instead
+// of being clipped by the old 8-bit SDR input path.
+float3 phosphorSourceToCRTDrive(
+    float3 source,
+    constant ShaderUniforms &uniforms
+) {
+    float transfer = uniforms.sourceColor.x;
+    if (transfer < 0.5) {
+        return saturate(source);
+    }
+
+    float3 linear;
+    if (transfer < 1.5) {
+        linear = max(source, 0.0);
+    } else if (transfer < 2.5) {
+        linear = phosphorPQToLinear(source);
+    } else {
+        linear = phosphorHLGToLinear(source);
+    }
+    linear = max(
+        phosphorToSRGBPrimaries(linear, uniforms.sourceColor.y),
+        0.0
+    );
+
+    float luminance = dot(linear, float3(0.2126, 0.7152, 0.0722));
+    float mappedLuminance = luminance;
+    if (luminance > 0.72) {
+        mappedLuminance = 0.72
+            + 0.28 * (1.0 - exp(-(luminance - 0.72) * 0.72));
+    }
+    float3 mapped = linear * (mappedLuminance / max(luminance, 0.00001));
+    return saturate(phosphorLinearToSRGB(mapped));
 }
 
 float phosphorMaximum(float3 color) {
@@ -187,11 +280,18 @@ float3 phosphorSampleEncodedNV12(
         dot(uniforms.yuvRow1, yuv),
         dot(uniforms.yuvRow2, yuv)
     );
-    return saturate(encodedRGB);
+    return phosphorSourceToCRTDrive(encodedRGB, uniforms);
 }
 
-float3 phosphorSampleEncodedBGRA(texture2d<float> colorTexture, float2 uv) {
-    return saturate(colorTexture.sample(phosphorLinearSampler, uv).rgb);
+float3 phosphorSampleEncodedBGRA(
+    texture2d<float> colorTexture,
+    float2 uv,
+    constant ShaderUniforms &uniforms
+) {
+    return phosphorSourceToCRTDrive(
+        colorTexture.sample(phosphorLinearSampler, uv).rgb,
+        uniforms
+    );
 }
 
 // Reconstructs the bandwidth and channel coupling of the selected analog input.
@@ -296,7 +396,7 @@ fragment float4 phosphorBypassFragmentBGRA(
         return float4(0.0, 0.0, 0.0, 1.0);
     }
     return float4(phosphorSRGBToLinear(
-        phosphorSampleEncodedBGRA(colorTexture, fitted.sourceUV)
+        phosphorSampleEncodedBGRA(colorTexture, fitted.sourceUV, uniforms)
     ), 1.0);
 }
 
@@ -319,12 +419,15 @@ fragment float4 phosphorDecodeFragmentBGRA(
     constant ShaderUniforms &uniforms [[buffer(0)]],
     texture2d<float> colorTexture [[texture(0)]]
 ) {
-    return float4(phosphorSampleEncodedBGRA(colorTexture, input.uv), 1.0);
+    return float4(
+        phosphorSampleEncodedBGRA(colorTexture, input.uv, uniforms),
+        1.0
+    );
 }
 
-// Direct Metal port of afterglow0.slang's default path. Phosphor keeps the
-// previous decoded video frame and the feedback texture explicitly because
-// AVPlayerItemVideoOutput does not provide RetroArch's OriginalHistory0.
+// Direct Metal port of afterglow0.slang's default path, retained for reference
+// tests and shader tooling. Live playback uses the post-mask temporal model so
+// persistence is applied once at the physical phosphor stage.
 float4 guestAfterglowValue(
     float2 uv,
     constant ShaderUniforms &uniforms,
@@ -445,13 +548,12 @@ fragment float4 guestPrepassFragment(
 fragment float4 guestPrepassLinearizedFragment(
     FullscreenVertex input [[stage_in]],
     constant ShaderUniforms &uniforms [[buffer(0)]],
-    texture2d<float> currentSource [[texture(0)]],
-    texture2d<float> afterglowTexture [[texture(1)]]
+    texture2d<float> currentSource [[texture(0)]]
 ) {
     float4 encoded = guestPrepassEncodedValue(
         input.uv,
         currentSource.sample(phosphorLinearSampler, input.uv).rgb,
-        afterglowTexture.sample(phosphorLinearSampler, input.uv),
+        float4(0.0, 0.0, 0.0, 1.0),
         uniforms
     );
 
@@ -463,29 +565,23 @@ fragment float4 guestPrepassLinearizedFragment(
 
 struct GuestFramePreparationOutput {
     float4 raw [[color(0)]];
-    float4 history [[color(1)]];
-    float4 prepassLinearized [[color(2)]];
+    float4 prepassLinearized [[color(1)]];
 };
 
 GuestFramePreparationOutput guestPrepareFrame(
     float2 uv,
     float3 encodedSource,
-    constant ShaderUniforms &uniforms,
-    texture2d<float> previousSource,
-    texture2d<float> feedbackTexture
+    constant ShaderUniforms &uniforms
 ) {
     GuestFramePreparationOutput output;
     output.raw = float4(encodedSource, 1.0);
-    output.history = guestAfterglowValue(
-        uv,
-        uniforms,
-        previousSource,
-        feedbackTexture
-    );
+    // Persistence now occurs once, after the beam excites the physical mask.
+    // Eliminating Guest's older source-frame feedback avoids colored motion
+    // ghosts and removes one render target write from every decoded frame.
     float4 encodedPrepass = guestPrepassEncodedValue(
         uv,
         encodedSource,
-        output.history,
+        float4(0.0, 0.0, 0.0, 1.0),
         uniforms
     );
     output.prepassLinearized = float4(
@@ -499,9 +595,7 @@ fragment GuestFramePreparationOutput guestPrepareFrameNV12Fragment(
     FullscreenVertex input [[stage_in]],
     constant ShaderUniforms &uniforms [[buffer(0)]],
     texture2d<float> lumaTexture [[texture(0)]],
-    texture2d<float> chromaTexture [[texture(1)]],
-    texture2d<float> previousSource [[texture(2)]],
-    texture2d<float> feedbackTexture [[texture(3)]]
+    texture2d<float> chromaTexture [[texture(1)]]
 ) {
     float2 dx = float2(uniforms.sourceSize.z, 0.0);
     float3 center = phosphorSampleEncodedNV12(
@@ -521,36 +615,252 @@ fragment GuestFramePreparationOutput guestPrepareFrameNV12Fragment(
             input.uv,
             uniforms
         ),
-        uniforms,
-        previousSource,
-        feedbackTexture
+        uniforms
     );
 }
 
 fragment GuestFramePreparationOutput guestPrepareFrameBGRAFragment(
     FullscreenVertex input [[stage_in]],
     constant ShaderUniforms &uniforms [[buffer(0)]],
-    texture2d<float> colorTexture [[texture(0)]],
-    texture2d<float> previousSource [[texture(1)]],
-    texture2d<float> feedbackTexture [[texture(2)]]
+    texture2d<float> colorTexture [[texture(0)]]
 ) {
     float2 dx = float2(uniforms.sourceSize.z, 0.0);
-    float3 center = phosphorSampleEncodedBGRA(colorTexture, input.uv);
+    float3 center = phosphorSampleEncodedBGRA(colorTexture, input.uv, uniforms);
     return guestPrepareFrame(
         input.uv,
         guestAnalogSignal(
             center,
-            phosphorSampleEncodedBGRA(colorTexture, input.uv - dx),
-            phosphorSampleEncodedBGRA(colorTexture, input.uv + dx),
-            phosphorSampleEncodedBGRA(colorTexture, input.uv - 2.0 * dx),
-            phosphorSampleEncodedBGRA(colorTexture, input.uv + 2.0 * dx),
+            phosphorSampleEncodedBGRA(colorTexture, input.uv - dx, uniforms),
+            phosphorSampleEncodedBGRA(colorTexture, input.uv + dx, uniforms),
+            phosphorSampleEncodedBGRA(colorTexture, input.uv - 2.0 * dx, uniforms),
+            phosphorSampleEncodedBGRA(colorTexture, input.uv + 2.0 * dx, uniforms),
             input.uv,
             uniforms
         ),
-        uniforms,
-        previousSource,
-        feedbackTexture
+        uniforms
     );
+}
+
+float guestCompositeCarrierPhase(
+    float sampleIndex,
+    float sourceLine,
+    constant ShaderUniforms &uniforms
+) {
+    float sampleFraction = (sampleIndex + 0.5) / uniforms.compositeData.x;
+    return 6.28318530718
+        * (sourceLine + sampleFraction)
+        * uniforms.compositeData.y
+        + uniforms.frameData.x * 1.57079632679;
+}
+
+float guestCompositeWaveform(
+    float3 center,
+    float3 left,
+    float3 right,
+    float3 farLeft,
+    float3 farRight,
+    float sampleIndex,
+    float sourceLine,
+    constant ShaderUniforms &uniforms
+) {
+    constexpr float3 lumaWeights = float3(0.299, 0.587, 0.114);
+    float3 lumaSamples = float3(
+        dot(left, lumaWeights),
+        dot(center, lumaWeights),
+        dot(right, lumaWeights)
+    );
+    float luma = dot(lumaSamples, float3(0.18, 0.64, 0.18));
+    // The asymmetric five-sample chroma filter both limits color bandwidth and
+    // leaves the small group delay found in an analog decoder's chroma path.
+    float3 chromaRGB = (
+        2.0 * farLeft + 3.0 * left + 3.0 * center + right
+    ) / 9.0;
+    float phase = guestCompositeCarrierPhase(
+        sampleIndex,
+        sourceLine,
+        uniforms
+    );
+
+    if (uniforms.compositeData.w > 0.5) {
+        float u = dot(chromaRGB, float3(-0.14713, -0.28886, 0.43600));
+        float v = dot(chromaRGB, float3(0.61500, -0.51499, -0.10001));
+        float palSwitch = fmod(sourceLine, 2.0) >= 1.0 ? -1.0 : 1.0;
+        return luma + 0.493 * u * sin(phase)
+            + 0.877 * v * palSwitch * cos(phase);
+    }
+
+    float i = dot(chromaRGB, float3(0.595716, -0.274453, -0.321263));
+    float q = dot(chromaRGB, float3(0.211456, -0.522591, 0.311135));
+    return luma + 0.5957 * i * cos(phase) + 0.5226 * q * sin(phase);
+}
+
+fragment float4 guestCompositeEncodeNV12Fragment(
+    FullscreenVertex input [[stage_in]],
+    constant ShaderUniforms &uniforms [[buffer(0)]],
+    texture2d<float> lumaTexture [[texture(0)]],
+    texture2d<float> chromaTexture [[texture(1)]]
+) {
+    float sampleIndex = floor(input.uv.x * uniforms.compositeData.x);
+    float sourceLine = floor(input.uv.y * uniforms.rasterSize.y);
+    float2 dx = float2(1.0 / uniforms.compositeData.x, 0.0);
+    float3 center = phosphorSampleEncodedNV12(
+        lumaTexture, chromaTexture, input.uv, uniforms
+    );
+    float signal = guestCompositeWaveform(
+        center,
+        phosphorSampleEncodedNV12(lumaTexture, chromaTexture, input.uv - dx, uniforms),
+        phosphorSampleEncodedNV12(lumaTexture, chromaTexture, input.uv + dx, uniforms),
+        phosphorSampleEncodedNV12(lumaTexture, chromaTexture, input.uv - 2.0 * dx, uniforms),
+        phosphorSampleEncodedNV12(lumaTexture, chromaTexture, input.uv + 2.0 * dx, uniforms),
+        sampleIndex,
+        sourceLine,
+        uniforms
+    );
+    return float4(signal, 0.0, 0.0, 1.0);
+}
+
+fragment float4 guestCompositeEncodeBGRAFragment(
+    FullscreenVertex input [[stage_in]],
+    constant ShaderUniforms &uniforms [[buffer(0)]],
+    texture2d<float> colorTexture [[texture(0)]]
+) {
+    float sampleIndex = floor(input.uv.x * uniforms.compositeData.x);
+    float sourceLine = floor(input.uv.y * uniforms.rasterSize.y);
+    float2 dx = float2(1.0 / uniforms.compositeData.x, 0.0);
+    float3 center = phosphorSampleEncodedBGRA(
+        colorTexture, input.uv, uniforms
+    );
+    float signal = guestCompositeWaveform(
+        center,
+        phosphorSampleEncodedBGRA(colorTexture, input.uv - dx, uniforms),
+        phosphorSampleEncodedBGRA(colorTexture, input.uv + dx, uniforms),
+        phosphorSampleEncodedBGRA(colorTexture, input.uv - 2.0 * dx, uniforms),
+        phosphorSampleEncodedBGRA(colorTexture, input.uv + 2.0 * dx, uniforms),
+        sampleIndex,
+        sourceLine,
+        uniforms
+    );
+    return float4(signal, 0.0, 0.0, 1.0);
+}
+
+float guestCompositeSample(
+    texture2d<float> waveform,
+    float2 uv,
+    float sampleOffset,
+    float lineOffset,
+    constant ShaderUniforms &uniforms
+) {
+    float2 offset = float2(
+        sampleOffset / uniforms.compositeData.x,
+        lineOffset * uniforms.rasterSize.w
+    );
+    return waveform.sample(phosphorLinearSampler, uv + offset).r;
+}
+
+float guestCompositeLuma(
+    texture2d<float> waveform,
+    float2 uv,
+    constant ShaderUniforms &uniforms
+) {
+    float center = guestCompositeSample(waveform, uv, 0.0, 0.0, uniforms);
+    if (uniforms.compositeData.z > 0.5) {
+        // NTSC's carrier reverses on the adjacent line. PAL needs a two-line
+        // delay: after two 283.75-cycle lines the carrier is reversed while
+        // the alternating V-axis switch has returned to its original sign.
+        float lineSeparation = uniforms.compositeData.w > 0.5 ? 2.0 : 1.0;
+        float adjacent = 0.5 * (
+            guestCompositeSample(
+                waveform, uv, 0.0, -lineSeparation, uniforms
+            )
+            + guestCompositeSample(
+                waveform, uv, 0.0, lineSeparation, uniforms
+            )
+        );
+        return 0.5 * (center + adjacent);
+    }
+
+    // Symmetric 4fsc notch: the color carrier integrates to zero while the
+    // lower-frequency luminance waveform retains its edge energy.
+    return (
+        guestCompositeSample(waveform, uv, -2.0, 0.0, uniforms)
+        + 2.0 * guestCompositeSample(waveform, uv, -1.0, 0.0, uniforms)
+        + 2.0 * center
+        + 2.0 * guestCompositeSample(waveform, uv, 1.0, 0.0, uniforms)
+        + guestCompositeSample(waveform, uv, 2.0, 0.0, uniforms)
+    ) / 8.0;
+}
+
+struct GuestCompositeDecodeOutput {
+    float4 raw [[color(0)]];
+    float4 prepassLinearized [[color(1)]];
+};
+
+fragment GuestCompositeDecodeOutput guestCompositeDecodeFragment(
+    FullscreenVertex input [[stage_in]],
+    constant ShaderUniforms &uniforms [[buffer(0)]],
+    texture2d<float> waveform [[texture(0)]]
+) {
+    float sampleIndex = floor(input.uv.x * uniforms.compositeData.x);
+    float sourceLine = floor(input.uv.y * uniforms.rasterSize.y);
+    float luma = guestCompositeLuma(waveform, input.uv, uniforms);
+    float componentA = 0.0;
+    float componentB = 0.0;
+    float weightSum = 0.0;
+    for (int offset = -6; offset <= 6; ++offset) {
+        float weight = exp2(-0.16 * float(offset * offset));
+        float2 sampleUV = input.uv + float2(
+            float(offset) / uniforms.compositeData.x,
+            0.0
+        );
+        float chroma = guestCompositeSample(
+            waveform, input.uv, float(offset), 0.0, uniforms
+        ) - guestCompositeLuma(waveform, sampleUV, uniforms);
+        float phase = guestCompositeCarrierPhase(
+            sampleIndex + float(offset),
+            sourceLine,
+            uniforms
+        );
+        componentA += chroma * cos(phase) * weight * 2.0;
+        componentB += chroma * sin(phase) * weight * 2.0;
+        weightSum += weight;
+    }
+    componentA /= max(weightSum, 0.00001);
+    componentB /= max(weightSum, 0.00001);
+
+    float3 decoded;
+    if (uniforms.compositeData.w > 0.5) {
+        float palSwitch = fmod(sourceLine, 2.0) >= 1.0 ? -1.0 : 1.0;
+        float u = componentB / 0.493;
+        float v = componentA * palSwitch / 0.877;
+        decoded = float3(
+            luma + 1.13983 * v,
+            luma - 0.39465 * u - 0.58060 * v,
+            luma + 2.03211 * u
+        );
+    } else {
+        float i = componentA / 0.5957;
+        float q = componentB / 0.5226;
+        decoded = float3(
+            luma + 0.9563 * i + 0.6210 * q,
+            luma - 0.2721 * i - 0.6474 * q,
+            luma - 1.1070 * i + 1.7046 * q
+        );
+    }
+    decoded = saturate(decoded);
+    float4 encodedPrepass = guestPrepassEncodedValue(
+        input.uv,
+        decoded,
+        float4(0.0, 0.0, 0.0, 1.0),
+        uniforms
+    );
+
+    GuestCompositeDecodeOutput output;
+    output.raw = float4(decoded, 1.0);
+    output.prepassLinearized = float4(
+        pow(max(encodedPrepass.rgb, 0.0), float3(uniforms.guestColor.x)),
+        encodedPrepass.a
+    );
+    return output;
 }
 
 // linearize-hd.slang's non-interlaced default path. AVFoundation already
@@ -978,14 +1288,19 @@ float3 guestApertureMask(
     float2 physicalPixel,
     float brightness,
     float control,
-    float maskScale
+    float maskScale,
+    float4 geometry
 ) {
     float scale = max(maskScale, 1.0);
     float2 maskCoordinate = physicalPixel / scale;
     float subphosphor = floor(fmod(maskCoordinate.x, 3.0));
     float3 emitterColor = guestEmitterColor(subphosphor);
     float localX = fract(maskCoordinate.x);
-    float halfWidth = mix(0.31, 0.47, saturate(brightness));
+    float halfWidth = mix(
+        geometry.x * 0.82,
+        min(geometry.x + 0.08, 0.49),
+        saturate(brightness)
+    );
     float wireSoftness = 0.16 / scale;
     float stripe = 1.0 - smoothstep(
         halfWidth - wireSoftness,
@@ -1008,22 +1323,23 @@ float3 guestSlotPhosphorMask(
     float2 physicalPixel,
     float brightness,
     float control,
-    float maskScale
+    float maskScale,
+    float4 geometry
 ) {
     float scale = max(maskScale, 1.0);
     float2 maskCoordinate = physicalPixel / scale;
     float triad = floor(maskCoordinate.x / 3.0);
     float subphosphor = floor(fmod(maskCoordinate.x, 3.0));
     float stagger = fmod(abs(triad), 2.0) * 0.5;
-    constexpr float slotPitch = 4.0;
+    float slotPitch = max(geometry.z, 2.0);
     float2 local = float2(
         fract(maskCoordinate.x),
         fract(maskCoordinate.y / slotPitch + stagger)
     );
     float energy = saturate(brightness);
     float2 halfExtent = float2(
-        mix(0.23, 0.38, energy),
-        mix(0.34, 0.46, energy)
+        mix(geometry.x * 0.76, min(geometry.x + 0.08, 0.47), energy),
+        mix(geometry.y * 0.88, min(geometry.y + 0.08, 0.48), energy)
     );
     float softness = 0.13 / scale;
     float slot = guestRoundedEmitter(local, halfExtent, softness);
@@ -1038,6 +1354,44 @@ float3 guestSlotPhosphorMask(
     return saturate(mix(
         float3(1.0),
         phosphors,
+        saturate(control)
+    ));
+}
+
+// Delta-gun shadow masks use discrete phosphor dots in offset RGB triads. The
+// circular deposits and surrounding black matrix are resolved in native panel
+// pixels so the pattern remains a physical lattice rather than a screen-space
+// color overlay.
+float3 guestShadowDotMask(
+    float2 physicalPixel,
+    float brightness,
+    float control,
+    float maskScale,
+    float4 geometry
+) {
+    float scale = max(maskScale, 1.0);
+    float2 coordinate = physicalPixel / scale;
+    float row = floor(coordinate.y / 2.0);
+    float stagger = fmod(abs(row), 2.0) * 1.5;
+    float shiftedX = coordinate.x + stagger;
+    float subphosphor = floor(fmod(shiftedX, 3.0));
+    float2 local = float2(
+        fract(shiftedX),
+        fract(coordinate.y / 2.0)
+    ) - 0.5;
+    float energy = saturate(brightness);
+    float2 radius = float2(
+        mix(geometry.w * 0.78, min(geometry.w + 0.07, 0.48), energy),
+        mix(geometry.w * 0.68, min(geometry.w + 0.04, 0.46), energy)
+    );
+    float normalizedDistance = length(local / max(radius, 0.01));
+    float dot = 1.0 - smoothstep(0.82, 1.08, normalizedDistance);
+    float halo = 1.0 - smoothstep(0.94, 1.28, normalizedDistance);
+    float3 emitterColor = guestEmitterColor(subphosphor);
+    float spill = max(halo - dot, 0.0) * energy * 0.09;
+    return saturate(mix(
+        float3(1.0),
+        emitterColor * dot + spill,
         saturate(control)
     ));
 }
@@ -1086,21 +1440,32 @@ float4 guestTubeSample(
     float colorMaximum = phosphorMaximum(beamSample.rgb);
     float brightness = max(beamSample.a, colorMaximum);
     float maskBrightness = pow(saturate(brightness), 1.40 / gammaInput);
-    bool usesSlotMask = guestUsesSlotMask;
+    bool usesSlotMask = guestMaskPattern == 1;
+    bool usesShadowMask = guestMaskPattern == 2;
     float3 mask;
     if (usesSlotMask) {
         mask = guestSlotPhosphorMask(
             input.position.xy,
             maskBrightness,
             uniforms.effect.w,
-            uniforms.effect2.z
+            uniforms.effect2.z,
+            uniforms.maskGeometry
+        );
+    } else if (usesShadowMask) {
+        mask = guestShadowDotMask(
+            input.position.xy,
+            maskBrightness,
+            uniforms.effect.w,
+            uniforms.effect2.z,
+            uniforms.maskGeometry
         );
     } else {
         mask = guestApertureMask(
             input.position.xy,
             maskBrightness,
             uniforms.effect.w,
-            uniforms.effect2.z
+            uniforms.effect2.z,
+            uniforms.maskGeometry
         );
     }
 
@@ -1131,7 +1496,9 @@ float4 guestTubeSample(
     );
     float slotCompensation = usesSlotMask
         ? mix(1.0, 1.12, saturate(uniforms.effect.w))
-        : 1.0;
+        : (usesShadowMask
+            ? mix(1.0, 1.16, saturate(uniforms.effect.w))
+            : 1.0);
     color *= brightBoost * darkCompensation * slotCompensation;
 
     float glowControl = saturate(uniforms.effect2.x);
@@ -1214,6 +1581,105 @@ struct GuestTemporalOutput {
     float4 display [[color(1)]];
 };
 
+struct GuestTemporalSolution {
+    float3 state;
+    float3 integrated;
+};
+
+float guestPixelBeamPhase(
+    float2 uv,
+    constant ShaderUniforms &uniforms
+) {
+    float totalLines = max(uniforms.scanTiming.z, 1.0);
+    float activeLines = min(max(uniforms.scanTiming.w, 1.0), totalLines);
+    float verticalBlankLead = 0.5 * (totalLines - activeLines);
+    float rasterLine = floor(saturate(uv.y) * max(activeLines - 1.0, 1.0));
+    float activeLineFraction = saturate(uniforms.scanTiming.y);
+    float horizontalBlankLead = 0.56 * (1.0 - activeLineFraction);
+    float linePhase = horizontalBlankLead + saturate(uv.x) * activeLineFraction;
+    return fract((verticalBlankLead + rasterLine + linePhase) / totalLines);
+}
+
+// Analytically integrates a train of electron-beam impulses over the panel's
+// presentation interval. This models horizontal scan timing and flyback without
+// sub-stepping the 15-kHz line clock, and it replaces the old constant exposure
+// floor with the emitted phosphor energy actually accumulated during the frame.
+GuestTemporalSolution guestIntegratePhosphor(
+    float2 uv,
+    float3 instantaneous,
+    float3 previous,
+    float discontinuity,
+    bool hasHistory,
+    constant ShaderUniforms &uniforms
+) {
+    GuestTemporalSolution result;
+    if (!hasHistory) {
+        result.state = instantaneous;
+        result.integrated = instantaneous;
+        return result;
+    }
+
+    float dt = max(uniforms.temporalData.y, 1.0 / 1000.0);
+    float refresh = max(uniforms.scanTiming.x, 24.0);
+    float scanPeriod = 1.0 / refresh;
+    float3 lifetime = max(uniforms.temporalResponse.xyz, float3(0.0005));
+    float3 retainedPrevious = previous * (1.0 - discontinuity);
+    float3 decay = exp(-dt / lifetime);
+    float3 state = retainedPrevious * decay;
+    float3 integrated = retainedPrevious
+        * lifetime
+        * (1.0 - decay)
+        / dt;
+
+    float pixelPhase = guestPixelBeamPhase(uv, uniforms);
+    float distanceBehindBeam = fract(
+        uniforms.temporalData.z - pixelPhase + 1.0
+    );
+    float scanSpan = saturate(uniforms.temporalData.w);
+    float phaseSoftness = max(
+        1.0 / (uniforms.scanTiming.z * 128.0),
+        0.000002
+    );
+    float swept = 1.0 - smoothstep(
+        scanSpan - phaseSoftness,
+        scanSpan + phaseSoftness,
+        distanceBehindBeam
+    );
+    float age = min(distanceBehindBeam * scanPeriod, dt);
+
+    // One beam visit deposits an impulse whose energy integrates to the desired
+    // steady luminance over a complete raster period.
+    float3 impulse = instantaneous * (scanPeriod / lifetime);
+    float3 ageDecay = exp(-age / lifetime);
+    state += impulse * ageDecay * swept;
+    integrated += impulse
+        * lifetime
+        * (1.0 - ageDecay)
+        * swept
+        / dt;
+
+    // Large local changes are source discontinuities, not phosphor energy. The
+    // current beam solution replaces the stale state immediately so fast motion
+    // and hard cuts never leave a colored double image.
+    integrated = mix(integrated, instantaneous, discontinuity * 0.94);
+
+    // Stable mode compensates only for the part of a raster not covered by a
+    // high-refresh panel presentation. Low-persistence mode leaves the physical
+    // rolling exposure untouched and is enabled only on 100-Hz-or-faster screens.
+    if (uniforms.temporalResponse.w < 0.5) {
+        float sampleHoldCompensation = (1.0 - scanSpan) * 0.42;
+        integrated = mix(
+            integrated,
+            instantaneous,
+            sampleHoldCompensation
+        );
+    }
+
+    result.state = max(state, 0.0);
+    result.integrated = max(integrated, 0.0);
+    return result;
+}
+
 // A CRT is a time-domain device. The beam excites only the region swept since
 // the previous display presentation; the native-resolution state texture then
 // decays with separate red, green, and blue phosphor time constants.
@@ -1237,46 +1703,23 @@ fragment GuestTemporalOutput guestPhosphorTemporalFragment(
         rawTexture
     );
 
-    float persistence = saturate(uniforms.tubeData.x);
-    float3 lifetime = mix(
-        float3(0.010, 0.014, 0.008),
-        float3(0.030, 0.050, 0.022),
-        persistence
+    float3 previous = previousExcitation.sample(
+        phosphorLinearSampler,
+        input.uv
+    ).rgb;
+    GuestTemporalSolution solution = guestIntegratePhosphor(
+        input.uv,
+        instantaneous.rgb,
+        previous,
+        0.0,
+        uniforms.videoData.w >= 0.5,
+        uniforms
     );
-    float3 decay = exp(-uniforms.temporalData.y / lifetime);
-    float3 state = instantaneous.rgb;
-    if (uniforms.videoData.w >= 0.5) {
-        float3 previous = previousExcitation.sample(
-            phosphorLinearSampler,
-            input.uv
-        ).rgb;
-        float3 decayed = previous * decay;
-        float distanceBehindBeam = fract(
-            uniforms.temporalData.z - input.uv.y + 1.0
-        );
-        float edgeWidth = max(2.0 * uniforms.drawableSize.w, 0.00001);
-        float swept = 1.0 - smoothstep(
-            uniforms.temporalData.w - edgeWidth,
-            uniforms.temporalData.w + edgeWidth,
-            distanceBehindBeam
-        );
-        float3 excited = max(decayed, instantaneous.rgb);
-        state = mix(decayed, excited, swept);
-    }
 
     GuestTemporalOutput output;
-    output.excitation = float4(state, 1.0);
-    // A Retina panel holds each rendered frame, whereas a CRT emits a brief
-    // light pulse that the eye integrates over the raster interval. Present a
-    // near-steady exposure floor from the current beam solution while keeping
-    // the raw excitation texture free to decay during motion and scene cuts.
-    float exposureFloor = mix(0.985, 0.998, persistence);
-    float3 integratedPresentation = max(
-        state,
-        instantaneous.rgb * exposureFloor
-    );
+    output.excitation = float4(solution.state, 1.0);
     output.display = float4(
-        min(integratedPresentation, max(uniforms.frameData.z, 1.0)),
+        min(solution.integrated, max(uniforms.frameData.z, 1.0)),
         1.0
     );
     return output;
@@ -1285,48 +1728,50 @@ fragment GuestTemporalOutput guestPhosphorTemporalFragment(
 // Live presentation entry point. The expensive tube/beam/optical solution is
 // cached only when the decoded source changes. This native-refresh pass keeps
 // the time-domain CRT behavior while reducing the per-pixel work to one cached
-// emission sample, one state sample, and half-precision persistence math.
+// emission sample, one state sample, and two low-resolution source samples.
 fragment GuestTemporalOutput guestPhosphorCachedTemporalFragment(
     FullscreenVertex input [[stage_in]],
     constant ShaderUniforms &uniforms [[buffer(0)]],
     texture2d<half> cachedEmission [[texture(0)]],
-    texture2d<half> previousExcitation [[texture(1)]]
+    texture2d<half> previousExcitation [[texture(1)]],
+    texture2d<half> currentSource [[texture(2)]],
+    texture2d<half> previousSource [[texture(3)]]
 ) {
-    half3 instantaneous = cachedEmission.sample(
+    float3 instantaneous = float3(cachedEmission.sample(
         phosphorLinearSampler,
         input.uv
-    ).rgb;
-    half3 state = instantaneous;
-
-    if (uniforms.videoData.w >= 0.5) {
-        half3 previous = previousExcitation.sample(
+    ).rgb);
+    float3 previous = float3(previousExcitation.sample(
+        phosphorLinearSampler,
+        input.uv
+    ).rgb);
+    float discontinuity = 0.0;
+    if (uniforms.frameData.w > 0.5 && uniforms.frameData.y > 0.5) {
+        float3 currentPixel = float3(currentSource.sample(
             phosphorLinearSampler,
             input.uv
-        ).rgb;
-        half3 decay = half3(uniforms.temporalResponse.xyz);
-        half3 decayed = previous * decay;
-        half distanceBehindBeam = half(fract(
-            uniforms.temporalData.z - input.uv.y + 1.0
-        ));
-        half edgeWidth = half(max(2.0 * uniforms.drawableSize.w, 0.00001));
-        half swept = 1.0h - smoothstep(
-            half(uniforms.temporalData.w) - edgeWidth,
-            half(uniforms.temporalData.w) + edgeWidth,
-            distanceBehindBeam
-        );
-        state = mix(decayed, max(decayed, instantaneous), swept);
+        ).rgb);
+        float3 previousPixel = float3(previousSource.sample(
+            phosphorLinearSampler,
+            input.uv
+        ).rgb);
+        float sourceDelta = length(currentPixel - previousPixel);
+        discontinuity = smoothstep(0.16, 0.58, sourceDelta);
     }
+    GuestTemporalSolution solution = guestIntegratePhosphor(
+        input.uv,
+        instantaneous,
+        previous,
+        discontinuity,
+        uniforms.videoData.w >= 0.5,
+        uniforms
+    );
 
     GuestTemporalOutput output;
-    output.excitation = float4(float3(state), 1.0);
-    half exposureFloor = half(uniforms.temporalResponse.w);
-    half3 integratedPresentation = max(
-        state,
-        instantaneous * exposureFloor
+    output.excitation = float4(solution.state, 1.0);
+    output.display = float4(
+        min(solution.integrated, max(uniforms.frameData.z, 1.0)),
+        1.0
     );
-    output.display = float4(float3(min(
-        integratedPresentation,
-        half3(max(uniforms.frameData.z, 1.0))
-    )), 1.0);
     return output;
 }

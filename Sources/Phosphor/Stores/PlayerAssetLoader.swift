@@ -79,18 +79,39 @@ enum MediaPreparation: Sendable, Equatable {
 struct VideoOutputConfiguration: Equatable, Sendable {
     static let player = VideoOutputConfiguration(
         pixelFormat: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-        isMetalCompatible: true
+        isMetalCompatible: true,
+        allowsWideColor: false,
+        colorProperties: nil
+    )
+    static let hdr = VideoOutputConfiguration(
+        pixelFormat: kCVPixelFormatType_64RGBAHalf,
+        isMetalCompatible: true,
+        allowsWideColor: true,
+        colorProperties: [
+            AVVideoColorPrimariesKey: AVVideoColorPrimaries_P3_D65,
+            AVVideoTransferFunctionKey: AVVideoTransferFunction_Linear,
+            AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
+        ]
     )
 
     let pixelFormat: OSType
     let isMetalCompatible: Bool
+    let allowsWideColor: Bool
+    let colorProperties: [String: String]?
 
     var pixelBufferAttributes: [String: any Sendable] {
-        [
+        var attributes: [String: any Sendable] = [
             kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
             kCVPixelBufferMetalCompatibilityKey as String: isMetalCompatible,
             kCVPixelBufferIOSurfacePropertiesKey as String: [String: String]()
         ]
+        if allowsWideColor {
+            attributes[AVVideoAllowWideColorKey] = true
+        }
+        if let colorProperties {
+            attributes[AVVideoColorPropertiesKey] = colorProperties
+        }
+        return attributes
     }
 
     func makeVideoOutput() -> AVPlayerItemVideoOutput {
@@ -133,7 +154,11 @@ enum AVURLAssetLoader {
             try? await tracks[0].load(.formatDescriptions)
         ) ?? []
 
-        let output = videoOutputConfiguration.makeVideoOutput()
+        let containsHDR = characteristics.contains(.containsHDRVideo)
+        let output = (containsHDR
+            ? VideoOutputConfiguration.hdr
+            : videoOutputConfiguration
+        ).makeVideoOutput()
         let item = AVPlayerItem(asset: asset)
         item.add(output)
 

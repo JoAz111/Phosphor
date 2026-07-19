@@ -95,6 +95,11 @@ static bool codec_supports_videotoolbox(const AVCodec *codec) {
     }
 }
 
+static bool hardware_video_is_disabled(void) {
+    const char *value = getenv("PHOSPHOR_DISABLE_VIDEOTOOLBOX");
+    return value && value[0] != '\0' && strcmp(value, "0") != 0;
+}
+
 static AVCodecContext *open_codec(
     AVFormatContext *format,
     int stream_index,
@@ -122,7 +127,9 @@ static AVCodecContext *open_codec(
         return NULL;
     }
 
-    if (hardware_video && codec_supports_videotoolbox(codec)) {
+    if (hardware_video
+        && !hardware_video_is_disabled()
+        && codec_supports_videotoolbox(codec)) {
         result = av_hwdevice_ctx_create(
             hardware_device,
             AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
@@ -276,7 +283,156 @@ static int pump_video_packet(PhosphorFFmpegVideoDecoder *decoder) {
     }
 }
 
-static CVPixelBufferRef make_bgra_pixel_buffer(AVFrame *frame, struct SwsContext **scaler) {
+static enum AVColorPrimaries effective_color_primaries(
+    const AVFrame *frame,
+    const AVCodecContext *codec
+) {
+    return frame->color_primaries != AVCOL_PRI_UNSPECIFIED
+        ? frame->color_primaries
+        : codec->color_primaries;
+}
+
+static enum AVColorTransferCharacteristic effective_color_transfer(
+    const AVFrame *frame,
+    const AVCodecContext *codec
+) {
+    return frame->color_trc != AVCOL_TRC_UNSPECIFIED
+        ? frame->color_trc
+        : codec->color_trc;
+}
+
+static enum AVColorSpace effective_color_space(
+    const AVFrame *frame,
+    const AVCodecContext *codec
+) {
+    return frame->colorspace != AVCOL_SPC_UNSPECIFIED
+        ? frame->colorspace
+        : codec->colorspace;
+}
+
+static enum AVColorRange effective_color_range(
+    const AVFrame *frame,
+    const AVCodecContext *codec
+) {
+    return frame->color_range != AVCOL_RANGE_UNSPECIFIED
+        ? frame->color_range
+        : codec->color_range;
+}
+
+static bool frame_uses_hdr_or_wide_color(
+    const AVFrame *frame,
+    const AVCodecContext *codec
+) {
+    enum AVColorTransferCharacteristic transfer = effective_color_transfer(
+        frame,
+        codec
+    );
+    return transfer == AVCOL_TRC_SMPTE2084
+        || transfer == AVCOL_TRC_ARIB_STD_B67
+        || effective_color_primaries(frame, codec) == AVCOL_PRI_BT2020
+        || effective_color_primaries(frame, codec) == AVCOL_PRI_SMPTE432;
+}
+
+static int swscale_color_space(
+    const AVFrame *frame,
+    const AVCodecContext *codec
+) {
+    switch (effective_color_space(frame, codec)) {
+        case AVCOL_SPC_BT2020_NCL:
+        case AVCOL_SPC_BT2020_CL:
+            return SWS_CS_BT2020;
+        case AVCOL_SPC_BT709:
+            return SWS_CS_ITU709;
+        case AVCOL_SPC_FCC:
+            return SWS_CS_FCC;
+        case AVCOL_SPC_SMPTE240M:
+            return SWS_CS_SMPTE240M;
+        case AVCOL_SPC_BT470BG:
+        case AVCOL_SPC_SMPTE170M:
+            return SWS_CS_ITU601;
+        default:
+            return frame->height > 576 ? SWS_CS_ITU709 : SWS_CS_ITU601;
+    }
+}
+
+static void attach_frame_color_properties(
+    CVPixelBufferRef pixel_buffer,
+    const AVFrame *frame,
+    const AVCodecContext *codec,
+    bool supplies_defaults
+) {
+    enum AVColorPrimaries color_primaries = effective_color_primaries(
+        frame,
+        codec
+    );
+    enum AVColorTransferCharacteristic color_transfer = effective_color_transfer(
+        frame,
+        codec
+    );
+    enum AVColorSpace color_space = effective_color_space(frame, codec);
+    CFStringRef primaries = kCVImageBufferColorPrimaries_ITU_R_709_2;
+    if (color_primaries == AVCOL_PRI_BT2020) {
+        primaries = kCVImageBufferColorPrimaries_ITU_R_2020;
+    } else if (color_primaries == AVCOL_PRI_SMPTE432) {
+        primaries = kCVImageBufferColorPrimaries_P3_D65;
+    }
+
+    CFStringRef transfer = kCVImageBufferTransferFunction_ITU_R_709_2;
+    if (color_transfer == AVCOL_TRC_SMPTE2084) {
+        transfer = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ;
+    } else if (color_transfer == AVCOL_TRC_ARIB_STD_B67) {
+        transfer = kCVImageBufferTransferFunction_ITU_R_2100_HLG;
+    } else if (color_transfer == AVCOL_TRC_LINEAR) {
+        transfer = kCVImageBufferTransferFunction_Linear;
+    }
+
+    CFStringRef matrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2;
+    if (color_space == AVCOL_SPC_BT2020_NCL
+        || color_space == AVCOL_SPC_BT2020_CL) {
+        matrix = kCVImageBufferYCbCrMatrix_ITU_R_2020;
+    } else if (color_space == AVCOL_SPC_BT470BG
+        || color_space == AVCOL_SPC_SMPTE170M) {
+        matrix = kCVImageBufferYCbCrMatrix_ITU_R_601_4;
+    }
+
+    if (supplies_defaults || color_primaries != AVCOL_PRI_UNSPECIFIED) {
+        CVBufferSetAttachment(
+            pixel_buffer,
+            kCVImageBufferColorPrimariesKey,
+            primaries,
+            kCVAttachmentMode_ShouldPropagate
+        );
+    }
+    if (supplies_defaults || color_transfer != AVCOL_TRC_UNSPECIFIED) {
+        CVBufferSetAttachment(
+            pixel_buffer,
+            kCVImageBufferTransferFunctionKey,
+            transfer,
+            kCVAttachmentMode_ShouldPropagate
+        );
+    }
+    if (supplies_defaults || color_space != AVCOL_SPC_UNSPECIFIED) {
+        CVBufferSetAttachment(
+            pixel_buffer,
+            kCVImageBufferYCbCrMatrixKey,
+            matrix,
+            kCVAttachmentMode_ShouldPropagate
+        );
+    }
+}
+
+static CVPixelBufferRef make_software_pixel_buffer(
+    AVFrame *frame,
+    AVCodecContext *codec,
+    struct SwsContext **scaler
+) {
+    bool preserves_hdr = frame_uses_hdr_or_wide_color(frame, codec);
+    OSType pixel_format = preserves_hdr
+        ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+        : kCVPixelFormatType_32BGRA;
+    enum AVPixelFormat destination_format = preserves_hdr
+        ? AV_PIX_FMT_P010
+        : AV_PIX_FMT_BGRA;
     const void *keys[] = {
         kCVPixelBufferMetalCompatibilityKey,
         kCVPixelBufferIOSurfacePropertiesKey
@@ -303,7 +459,7 @@ static CVPixelBufferRef make_bgra_pixel_buffer(AVFrame *frame, struct SwsContext
         kCFAllocatorDefault,
         frame->width,
         frame->height,
-        kCVPixelFormatType_32BGRA,
+        pixel_format,
         attributes,
         &pixel_buffer
     );
@@ -320,7 +476,7 @@ static CVPixelBufferRef make_bgra_pixel_buffer(AVFrame *frame, struct SwsContext
         (enum AVPixelFormat)frame->format,
         frame->width,
         frame->height,
-        AV_PIX_FMT_BGRA,
+        destination_format,
         SWS_BILINEAR,
         NULL,
         NULL,
@@ -331,10 +487,47 @@ static CVPixelBufferRef make_bgra_pixel_buffer(AVFrame *frame, struct SwsContext
         return NULL;
     }
 
+    // swscale does not infer the YUV matrix reliably from AVFrame metadata.
+    // Select it explicitly so software-decoded BT.2020/709 frames reach the
+    // shader as correctly interpreted, still-transfer-encoded sample values.
+    const int *source_coefficients = sws_getCoefficients(
+        swscale_color_space(frame, codec)
+    );
+    const int *destination_coefficients = sws_getCoefficients(SWS_CS_ITU709);
+    if (preserves_hdr) {
+        destination_coefficients = source_coefficients;
+    }
+    (void)sws_setColorspaceDetails(
+        *scaler,
+        source_coefficients,
+        effective_color_range(frame, codec) == AVCOL_RANGE_JPEG,
+        destination_coefficients,
+        preserves_hdr ? 0 : 1,
+        0,
+        1 << 16,
+        1 << 16
+    );
+
     CVPixelBufferLockBaseAddress(pixel_buffer, 0);
-    uint8_t *destination[] = { CVPixelBufferGetBaseAddress(pixel_buffer), NULL, NULL, NULL };
+    uint8_t *destination[] = {
+        preserves_hdr
+            ? CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0)
+            : CVPixelBufferGetBaseAddress(pixel_buffer),
+        preserves_hdr
+            ? CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1)
+            : NULL,
+        NULL,
+        NULL
+    };
     int destination_stride[] = {
-        (int)CVPixelBufferGetBytesPerRow(pixel_buffer), 0, 0, 0
+        (int)(preserves_hdr
+            ? CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0)
+            : CVPixelBufferGetBytesPerRow(pixel_buffer)),
+        preserves_hdr
+            ? (int)CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1)
+            : 0,
+        0,
+        0
     };
     int converted = sws_scale(
         *scaler,
@@ -350,6 +543,7 @@ static CVPixelBufferRef make_bgra_pixel_buffer(AVFrame *frame, struct SwsContext
         CVPixelBufferRelease(pixel_buffer);
         return NULL;
     }
+    attach_frame_color_properties(pixel_buffer, frame, codec, true);
     return pixel_buffer;
 }
 
@@ -371,8 +565,18 @@ int phosphor_ffmpeg_video_read(
                 && decoder->frame->data[3]) {
                 output = (CVPixelBufferRef)decoder->frame->data[3];
                 CVPixelBufferRetain(output);
+                attach_frame_color_properties(
+                    output,
+                    decoder->frame,
+                    decoder->codec,
+                    false
+                );
             } else {
-                output = make_bgra_pixel_buffer(decoder->frame, &decoder->scaler);
+                output = make_software_pixel_buffer(
+                    decoder->frame,
+                    decoder->codec,
+                    &decoder->scaler
+                );
             }
             int64_t timestamp = decoder->frame->best_effort_timestamp;
             if (timestamp != AV_NOPTS_VALUE) {

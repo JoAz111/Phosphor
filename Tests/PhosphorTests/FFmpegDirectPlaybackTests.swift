@@ -53,6 +53,64 @@ final class FFmpegDirectPlaybackTests: XCTestCase {
         )
     }
 
+    func testSoftwareDecoderPreservesHDRPixelFormatAndColorMetadata() throws {
+        let executable = URL(fileURLWithPath: "/opt/homebrew/bin/ffmpeg")
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            throw XCTSkip("FFmpeg development runtime is not installed")
+        }
+
+        let root = FileManager.default.temporaryDirectory
+            .appending(
+                path: "phosphor-hdr-\(UUID().uuidString)",
+                directoryHint: .isDirectory
+            )
+        let source = root.appending(path: "source.mkv")
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        setenv("PHOSPHOR_DISABLE_VIDEOTOOLBOX", "1", 1)
+        defer { unsetenv("PHOSPHOR_DISABLE_VIDEOTOOLBOX") }
+        try Self.run(executable, arguments: [
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24",
+            "-t", "0.2", "-pix_fmt", "yuv420p10le",
+            "-c:v", "libx265", "-preset", "ultrafast",
+            "-x265-params",
+            "log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc",
+            "-an", source.path
+        ])
+
+        let session = try FFmpegPlaybackSession(url: source)
+        var update: VideoFrameUpdate?
+        for _ in 0 ..< 100 where update == nil {
+            update = session.frameSource.frame(
+                forHostTime: ProcessInfo.processInfo.systemUptime,
+                requestedTime: 0,
+                isPlaying: false
+            )
+            if update == nil {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+        }
+
+        let frame = try XCTUnwrap(update?.pixelBuffer)
+        XCTAssertEqual(
+            CVPixelBufferGetPixelFormatType(frame),
+            kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+        )
+        XCTAssertEqual(
+            VideoColorConversion.make(for: frame),
+            VideoColorConversion(
+                transferFunction: .pq,
+                primaries: .bt2020
+            )
+        )
+        XCTAssertNotNil(session.colorMetadata.playbackNotice)
+    }
+
     func testDirectDecoderRejectsMissingInput() {
         XCTAssertThrowsError(
             try FFmpegPlaybackSession(

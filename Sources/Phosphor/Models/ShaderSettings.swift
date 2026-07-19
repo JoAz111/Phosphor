@@ -1,6 +1,7 @@
 enum PhosphorMaskPattern: Int, CaseIterable, Identifiable, Sendable {
     case apertureGrille
     case slotMask
+    case shadowMask
 
     var id: Int { rawValue }
 
@@ -10,6 +11,46 @@ enum PhosphorMaskPattern: Int, CaseIterable, Identifiable, Sendable {
             "Grille"
         case .slotMask:
             "Slot"
+        case .shadowMask:
+            "Shadow"
+        }
+    }
+}
+
+/// Selects the analog separator used after the composite waveform is sampled.
+///
+/// A notch decoder reproduces the soft, artifact-prone circuitry of inexpensive
+/// receivers. A line comb decoder preserves more luminance bandwidth by using
+/// the color-carrier phase relationship between adjacent scanlines.
+enum CRTCompositeDecoder: Int, CaseIterable, Identifiable, Sendable {
+    case notch
+    case lineComb
+
+    var id: Int { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .notch:
+            "Notch"
+        case .lineComb:
+            "Comb"
+        }
+    }
+}
+
+/// Controls how the short CRT light pulse is presented by a sample-and-hold panel.
+enum CRTTemporalMode: Int, CaseIterable, Identifiable, Sendable {
+    case stable
+    case lowPersistence
+
+    var id: Int { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .stable:
+            "Stable"
+        case .lowPersistence:
+            "Low Persistence"
         }
     }
 }
@@ -64,7 +105,7 @@ enum CRTSignalType: Int, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// Chooses a calibrated family of beam, mask, and faceplate characteristics.
+/// Chooses a reference-informed family of beam, mask, and faceplate traits.
 ///
 /// Profiles establish physically coherent defaults while the individual controls
 /// continue to scale their most visible traits.
@@ -82,7 +123,7 @@ enum CRTTubeProfile: Int, CaseIterable, Identifiable, Sendable {
         case .trinitron:
             "Trinitron"
         case .professionalMonitor:
-            "PVM"
+            "Studio Monitor"
         }
     }
 }
@@ -90,7 +131,7 @@ enum CRTTubeProfile: Int, CaseIterable, Identifiable, Sendable {
 /// User-adjustable controls for the physical CRT renderer.
 ///
 /// Values are sanitized at construction so the Metal uniform block never receives
-/// nonfinite numbers or parameters outside the shader's calibrated range.
+/// nonfinite numbers or parameters outside the shader's modeled range.
 struct ShaderSettings: Sendable, Equatable {
     var intensity: Float
     var curvature: Float
@@ -104,6 +145,8 @@ struct ShaderSettings: Sendable, Equatable {
     var focus: Float
     var rasterMode: CRTRasterMode
     var signalType: CRTSignalType
+    var compositeDecoder: CRTCompositeDecoder
+    var temporalMode: CRTTemporalMode
     var tubeProfile: CRTTubeProfile
 
     static let `default` = ShaderSettings()
@@ -125,6 +168,8 @@ struct ShaderSettings: Sendable, Equatable {
         focus: Float = 0.12,
         rasterMode: CRTRasterMode = .automatic,
         signalType: CRTSignalType = .rgb,
+        compositeDecoder: CRTCompositeDecoder = .lineComb,
+        temporalMode: CRTTemporalMode = .stable,
         tubeProfile: CRTTubeProfile = .consumerTV
     ) {
         self.intensity = intensity.sanitized(defaultValue: 0.88, to: 0 ... 1)
@@ -139,6 +184,8 @@ struct ShaderSettings: Sendable, Equatable {
         self.focus = focus.sanitized(defaultValue: 0.12, to: 0 ... 1)
         self.rasterMode = rasterMode
         self.signalType = signalType
+        self.compositeDecoder = compositeDecoder
+        self.temporalMode = temporalMode
         self.tubeProfile = tubeProfile
     }
 }

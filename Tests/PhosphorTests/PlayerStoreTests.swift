@@ -107,7 +107,7 @@ final class PlayerStoreTests: XCTestCase {
         XCTAssertEqual(store.duration, 90)
         XCTAssertEqual(
             store.noticeMessage,
-            VideoColorMetadata.hdrSDRPathNotice
+            VideoColorMetadata.hdrPlaybackNotice
         )
     }
 
@@ -198,6 +198,26 @@ final class PlayerStoreTests: XCTestCase {
         )
     }
 
+    func testHDRVideoOutputRequestsLinearWideColorHalfFloat() {
+        let attributes = VideoOutputConfiguration.hdr.pixelBufferAttributes
+
+        XCTAssertEqual(
+            attributes[kCVPixelBufferPixelFormatTypeKey as String] as? OSType,
+            kCVPixelFormatType_64RGBAHalf
+        )
+        XCTAssertEqual(attributes[AVVideoAllowWideColorKey] as? Bool, true)
+        let colorProperties = attributes[AVVideoColorPropertiesKey]
+            as? [String: String]
+        XCTAssertEqual(
+            colorProperties?[AVVideoTransferFunctionKey],
+            AVVideoTransferFunction_Linear
+        )
+        XCTAssertEqual(
+            colorProperties?[AVVideoColorPrimariesKey],
+            AVVideoColorPrimaries_P3_D65
+        )
+    }
+
     func testFFmpegDirectNoticeIsPresentedWithHDRNotice() async {
         let prepared = makePreparedPlayerAsset(
             duration: 12,
@@ -210,7 +230,7 @@ final class PlayerStoreTests: XCTestCase {
 
         XCTAssertEqual(
             store.noticeMessage,
-            "\(VideoColorMetadata.hdrSDRPathNotice) Decoding directly with bundled FFmpeg."
+            "\(VideoColorMetadata.hdrPlaybackNotice) Decoding directly with bundled FFmpeg."
         )
         XCTAssertFalse(store.isLoading)
     }

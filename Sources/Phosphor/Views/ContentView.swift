@@ -29,6 +29,10 @@ struct ContentView: View {
     private var rasterModeRawValue = ControlPreferences.default.rasterMode.rawValue
     @AppStorage("phosphor.shader.signalType")
     private var signalTypeRawValue = ControlPreferences.default.signalType.rawValue
+    @AppStorage("phosphor.shader.compositeDecoder")
+    private var compositeDecoderRawValue = ControlPreferences.default.compositeDecoder.rawValue
+    @AppStorage("phosphor.shader.temporalMode")
+    private var temporalModeRawValue = ControlPreferences.default.temporalMode.rawValue
     @AppStorage("phosphor.shader.tubeProfile")
     private var tubeProfileRawValue = ControlPreferences.default.tubeProfile.rawValue
     @AppStorage("phosphor.display.edrPhosphors")
@@ -172,6 +176,10 @@ struct ContentView: View {
             rasterMode: CRTRasterMode(rawValue: rasterModeRawValue)
                 ?? .automatic,
             signalType: CRTSignalType(rawValue: signalTypeRawValue) ?? .rgb,
+            compositeDecoder: CRTCompositeDecoder(rawValue: compositeDecoderRawValue)
+                ?? .lineComb,
+            temporalMode: CRTTemporalMode(rawValue: temporalModeRawValue)
+                ?? .stable,
             tubeProfile: CRTTubeProfile(rawValue: tubeProfileRawValue)
                 ?? .consumerTV,
             edrPhosphors: edrPhosphors
@@ -195,6 +203,8 @@ struct ContentView: View {
                 focus = preferences.focus
                 rasterModeRawValue = preferences.rasterMode.rawValue
                 signalTypeRawValue = preferences.signalType.rawValue
+                compositeDecoderRawValue = preferences.compositeDecoder.rawValue
+                temporalModeRawValue = preferences.temporalMode.rawValue
                 tubeProfileRawValue = preferences.tubeProfile.rawValue
                 edrPhosphors = preferences.edrPhosphors
             }

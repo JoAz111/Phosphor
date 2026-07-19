@@ -19,6 +19,8 @@ struct ControlPreferences: Equatable {
     var focus: Double
     var rasterMode: CRTRasterMode
     var signalType: CRTSignalType
+    var compositeDecoder: CRTCompositeDecoder
+    var temporalMode: CRTTemporalMode
     var tubeProfile: CRTTubeProfile
     var edrPhosphors: Bool
 
@@ -38,6 +40,8 @@ struct ControlPreferences: Equatable {
             focus: Float(focus),
             rasterMode: rasterMode,
             signalType: signalType,
+            compositeDecoder: compositeDecoder,
+            temporalMode: temporalMode,
             tubeProfile: tubeProfile
         )
     }
@@ -56,6 +60,8 @@ struct ControlPreferences: Equatable {
         focus: Double = Double(ShaderSettings.default.focus),
         rasterMode: CRTRasterMode = ShaderSettings.default.rasterMode,
         signalType: CRTSignalType = ShaderSettings.default.signalType,
+        compositeDecoder: CRTCompositeDecoder = ShaderSettings.default.compositeDecoder,
+        temporalMode: CRTTemporalMode = ShaderSettings.default.temporalMode,
         tubeProfile: CRTTubeProfile = ShaderSettings.default.tubeProfile,
         edrPhosphors: Bool = true
     ) {
@@ -72,6 +78,8 @@ struct ControlPreferences: Equatable {
         self.focus = focus
         self.rasterMode = rasterMode
         self.signalType = signalType
+        self.compositeDecoder = compositeDecoder
+        self.temporalMode = temporalMode
         self.tubeProfile = tubeProfile
         self.edrPhosphors = edrPhosphors
     }

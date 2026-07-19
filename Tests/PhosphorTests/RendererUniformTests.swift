@@ -80,21 +80,6 @@ final class RendererUniformTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(crt.preferred), 120)
     }
 
-    func testTemporalHistoryAdvancesOnlyForVideoFramesOrInitialization() {
-        XCTAssertTrue(MetalRenderer.shouldAdvanceHistory(
-            hasNewPixelBuffer: true,
-            historyIsValid: true
-        ))
-        XCTAssertTrue(MetalRenderer.shouldAdvanceHistory(
-            hasNewPixelBuffer: false,
-            historyIsValid: false
-        ))
-        XCTAssertFalse(MetalRenderer.shouldAdvanceHistory(
-            hasNewPixelBuffer: false,
-            historyIsValid: true
-        ))
-    }
-
     func testGuestRasterUsesNativeSDLinesButResamplesHDVideo() {
         XCTAssertEqual(
             MetalRenderer.guestRasterSize(
@@ -184,8 +169,8 @@ final class RendererUniformTests: XCTestCase {
     }
 
     func testShaderUniformLayoutMatchesMetalLayout() {
-        XCTAssertEqual(MemoryLayout<ShaderUniforms>.size, 288)
-        XCTAssertEqual(MemoryLayout<ShaderUniforms>.stride, 288)
+        XCTAssertEqual(MemoryLayout<ShaderUniforms>.size, 352)
+        XCTAssertEqual(MemoryLayout<ShaderUniforms>.stride, 352)
         XCTAssertEqual(MemoryLayout<ShaderUniforms>.alignment, 16)
     }
 
@@ -203,6 +188,8 @@ final class RendererUniformTests: XCTestCase {
             focus: 0.19,
             rasterMode: .interlaced480,
             signalType: .compositeNTSC,
+            compositeDecoder: .notch,
+            temporalMode: .lowPersistence,
             tubeProfile: .professionalMonitor
         )
 
@@ -211,24 +198,32 @@ final class RendererUniformTests: XCTestCase {
             sourceSize: SIMD2(1_920, 1_080),
             rasterSize: SIMD2(960, 540),
             settings: settings,
-            yuvConversion: .make(matrix: .bt709, range: .video)
+            yuvConversion: .make(matrix: .bt709, range: .video),
+            maximumDisplayFrameRate: 120
         )
 
         XCTAssertEqual(uniforms.drawableSize, SIMD4(3_840, 2_160, 1 / 3_840, 1 / 2_160))
         XCTAssertEqual(uniforms.sourceSize, SIMD4(1_920, 1_080, 1 / 1_920, 1 / 1_080))
         XCTAssertEqual(uniforms.rasterSize, SIMD4(960, 540, 1 / 960, 1 / 540))
         XCTAssertEqual(uniforms.effect, SIMD4(0.11, 0.12, 0.13, 0.14))
-        XCTAssertEqual(uniforms.effect2, SIMD4(0.15, 0.16, 3, 1))
+        XCTAssertEqual(uniforms.effect2, SIMD4(0.15, 0.16, 2, 1))
         XCTAssertEqual(uniforms.guestBeam, SIMD4(7.2, 9.0, 1.02, 0.88))
         XCTAssertEqual(uniforms.guestLight, SIMD4(0.22, 0.045, 1.25, 1.05))
-        XCTAssertEqual(uniforms.guestColor, SIMD4(1.86, 1.78, 0.14, 0.46))
+        XCTAssertEqual(uniforms.guestColor, SIMD4(1.86, 1.78, 0, 0.46))
         XCTAssertEqual(uniforms.guestScan, SIMD4(0.68, 0.62, 1.0, 2.30))
         XCTAssertEqual(uniforms.guestMask, SIMD4(6.0, 1.06, 2.30, 1.0))
         XCTAssertEqual(uniforms.frameData.z, 1)
         XCTAssertTrue(uniforms.temporalResponse.x.isFinite)
-        XCTAssertGreaterThan(uniforms.temporalResponse.w, 0.98)
+        XCTAssertGreaterThan(uniforms.temporalResponse.y, uniforms.temporalResponse.x)
+        XCTAssertGreaterThan(uniforms.temporalResponse.x, uniforms.temporalResponse.z)
+        XCTAssertLessThan(uniforms.temporalResponse.y / uniforms.temporalResponse.z, 1.5)
+        XCTAssertEqual(uniforms.temporalResponse.w, 1)
         XCTAssertEqual(uniforms.tubeData, SIMD4(0.17, 0.18, 0.19, 2))
         XCTAssertEqual(uniforms.videoData.z, 2)
+        XCTAssertEqual(uniforms.sourceColor, SIMD4(0, 0, 1, 0))
+        XCTAssertEqual(uniforms.scanTiming, SIMD4(60, 0.828, 262.5, 240))
+        XCTAssertEqual(uniforms.maskGeometry, SIMD4(0.36, 0.40, 3, 0.32))
+        XCTAssertEqual(uniforms.compositeData, SIMD4(910, 227.5, 0, 0))
     }
 
     func testEDRHeadroomIsClampedWithoutChangingUniformLayout() {
@@ -242,6 +237,14 @@ final class RendererUniformTests: XCTestCase {
             yuvConversion: conversion,
             edrHeadroom: 8
         )
+        let capped = ShaderUniforms(
+            drawableSize: SIMD2(1, 1),
+            sourceSize: SIMD2(1, 1),
+            rasterSize: SIMD2(1, 1),
+            settings: .default,
+            yuvConversion: conversion,
+            edrHeadroom: 40
+        )
         let invalid = ShaderUniforms(
             drawableSize: SIMD2(1, 1),
             sourceSize: SIMD2(1, 1),
@@ -251,8 +254,29 @@ final class RendererUniformTests: XCTestCase {
             edrHeadroom: .nan
         )
 
-        XCTAssertEqual(edr.frameData.z, 2)
+        XCTAssertEqual(edr.frameData.z, 8)
+        XCTAssertEqual(capped.frameData.z, 16)
         XCTAssertEqual(invalid.frameData.z, 1)
+    }
+
+    func testHDRColorMetadataAndPALTimingMapToUniforms() {
+        let uniforms = ShaderUniforms(
+            drawableSize: SIMD2(3_840, 2_160),
+            sourceSize: SIMD2(3_840, 2_160),
+            rasterSize: SIMD2(768, 576),
+            settings: ShaderSettings(signalType: .compositePAL),
+            yuvConversion: .make(matrix: .bt2020, range: .video10),
+            videoColor: VideoColorConversion(
+                transferFunction: .pq,
+                primaries: .bt2020
+            ),
+            edrHeadroom: 6,
+            rasterRefreshRate: 50
+        )
+
+        XCTAssertEqual(uniforms.sourceColor, SIMD4(2, 2, 6, 1))
+        XCTAssertEqual(uniforms.scanTiming, SIMD4(50, 0.819, 312.5, 288))
+        XCTAssertEqual(uniforms.compositeData, SIMD4(1_135, 283.75, 1, 1))
     }
 
     func testBT601RowsMapIntoUniformFields() {
